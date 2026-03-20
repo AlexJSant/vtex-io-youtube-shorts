@@ -1,0 +1,20 @@
+{
+  "vendor": "sunhouse",
+  "name": "youtube-shorts-widget",
+  "version": "0.0.1",
+  "title": "YouTube Shorts Widget",
+  "description": "Floating, draggable YouTube Shorts/video widget for storefronts. Supports 9:16 aspect ratio, desktop/mobile layouts, player controls, fullscreen, and customizable display.",
+  "builders": {
+    "react": "3.x",
+    "messages": "1.x",
+    "docs": "0.x",
+    "styles": "2.x",
+    "store": "0.x"
+  },
+  "dependencies": {},
+  "registries": [
+    "smartcheckout"
+  ],
+  "policies": [],
+  "$schema": "https://raw.githubusercontent.com/vtex/node-vtex-api/master/gen/manifest.schema"
+}
