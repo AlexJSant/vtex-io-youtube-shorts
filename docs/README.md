@@ -14,7 +14,14 @@ Current behavior (updated):
 
 - Draggable by any non-interactive area of the card.
 - Resizable from borders/corners on desktop (keeps 9:16 aspect ratio).
-- Hover controls with progress, play/pause and volume (volume slider opens vertically).
+- Hover controls with progress, play/pause and volume.
+- Volume control uses a single visual component: circular button in idle state, expanding upward on hover to reveal the vertical slider.
+- Volume expansion is overlayed and does not shift neighboring controls.
+- Dock mode is active when viewport width is below `DOCK_ACTIVATION_MAX_WIDTH` (internal constant in component code).
+- In dock mode, the widget starts docked at the right side of the viewport, vertically centered.
+- Docked desktop state hides by position offset, keeping a visible slice; hover on the dock slice reveals the full card.
+- If still docked, leaving hover hides it again.
+- Docked mobile state hides the card and keeps a gray circular bubble visible.
 - Controls remain visible when video is paused.
 - Video header (title + author/channel from YouTube metadata) appears on hover (desktop) and on tap (mobile).
 - Floating `×` close button.
@@ -56,7 +63,6 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
     "props": {
       "shortsUrl": "https://www.youtube.com/shorts/dQw4w9WgXcQ",
       "startOnLoad": true,
-      "muted": true,
       "closable": true,
       "looping": true,
       "desktopAnchor": "bottom-right",
@@ -81,8 +87,7 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 | Prop name | Type | Description | Default value |
 | ---------- | ---- | ----------- | ------------- |
 | `shortsUrl` | `string` | YouTube URL (Shorts or `watch?v=<id>`). | `''` |
-| `startOnLoad` | `boolean` | If `true`, mounts the iframe and starts playback when the block loads. | `true` |
-| `muted` | `boolean` | If `true`, starts the embed muted (helps with autoplay). | `true` |
+| `startOnLoad` | `boolean` | If `true`, mounts the iframe and starts playback when the block loads. In docked mode, autoplay starts muted and follows dock hover mute/unmute behavior. | `true` |
 | `closable` | `boolean` | If `true`, shows the `×` close button and allows unmounting. | `true` |
 | `looping` | `boolean` | If `true`, the video restarts automatically when it ends (infinite loop). | `true` |
 | `desktopAnchor` | `top-left` \| `top-right` \| `bottom-left` \| `bottom-right` | Initial widget anchor in desktop view. | `'bottom-right'` |
@@ -92,6 +97,8 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 | `mobileOffsetX` | `number` | Horizontal offset in mobile view (px). | `12` |
 | `mobileOffsetY` | `number` | Vertical offset in mobile view (px). | `12` |
 
+> Note: `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY`, `mobileAnchor`, `mobileOffsetX`, and `mobileOffsetY` are not exposed in Site Editor controls. Keep using code/block props for these values.
+
 ### Notes
 
 - The widget only renders when `shortsUrl` contains a valid YouTube video URL/ID.
@@ -100,13 +107,20 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 - Playback state is reset when the store SPA URL changes.
 - Widget position is recalculated from the configured anchor/offsets on full reload and SPA route changes.
 - Mobile mode is considered when viewport width is lower than `1024px`.
+- Dock mode is considered when viewport width is lower than `DOCK_ACTIVATION_MAX_WIDTH` (currently `1620` in `react/YoutubeShortsWidget.tsx`).
 - Position controls:
   - `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY` define initial position in desktop.
   - `mobileAnchor`, `mobileOffsetX`, `mobileOffsetY` define initial position in mobile.
+- Initial position props are intentionally hidden from Site Editor and should be configured only via code/props.
 - Mobile interaction:
   - Tap shows controls for a short period.
   - Fullscreen is available via dedicated control button.
   - Dragging is enabled; edge-based resize is disabled.
+- Audio on load:
+  - There is no `muted` prop anymore.
+  - If the page loads with the widget already docked, autoplay starts muted.
+  - When hovering the revealed docked card (desktop), audio is unmuted.
+  - If the widget remains docked and hover ends, it becomes muted again.
 
 ## Development Log (This chat)
 

@@ -1,98 +1,71 @@
 # Development Log
 
-## Scope Covered In This Chat
+## Current State (after latest chat)
 
-- Added desktop/mobile split behavior using viewport threshold `<1024px`.
-- Added configurable initial position system:
-  - `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY`
-  - `mobileAnchor`, `mobileOffsetX`, `mobileOffsetY`
-- Added position reset behavior after:
-  - Full page reload
-  - SPA route transitions (`pushState`, `replaceState`, `popstate`)
-- Added controls visibility when video is paused (desktop).
-- Added YouTube metadata header overlay (title + author/channel).
-- Standardized hover transitions in interactive controls to `.3s ease-in-out`.
-- Implemented mobile dedicated controls area:
-  - Tap-to-show controls
-  - Auto-hide controls
-  - Fullscreen button
-- Mobile behavior currently:
-  - Fixed widget size (no manual resize gesture)
-  - Drag enabled
+- Dock behavior was fully reworked and stabilized.
+- Dock activation now uses a dedicated viewport rule:
+  - `DOCK_ACTIVATION_MAX_WIDTH` in `react/YoutubeShortsWidget.tsx` (currently `1620`).
+- Docked placement now follows the latest product decision:
+  - right side of viewport (using `offsetX`),
+  - vertically centered.
+- On load, when dock mode is active, widget starts docked.
 
-## Pending Adjustments / TODOs
+## Dock Rules Implemented
 
-- Make mobile fixed size configurable via schema prop (example: `mobileFixedWidth`), instead of hardcoded constant.
-- Review if desktop should preserve user drag position across route changes (currently resets to configured anchor by design).
-- Add optional prop for mobile controls auto-hide timeout (currently fixed).
-- Add optional prop to disable fullscreen button on mobile if store policy requires.
-- Evaluate adding CSS Handles for style customization (currently none).
-- Adjust size and positioning of all widget icons (play, pause, volume, mute, close).
-- Fix/adjust the noticeable delay when starting to drag the widget after the tap-to-pause + long-press-to-drag interaction change (likely tied to `LONG_PRESS_MS` / gesture discrimination).
+- Docked state (`isDocked=true`) now means the widget is truly attached to dock.
+- Undocking happens only via drag:
+  - dragging away and releasing outside dock region sets `isDocked=false`.
+- Re-docking happens only via drag:
+  - dropping back into the right dock region reattaches (`isDocked=true`).
+- Dock region logic:
+  - based on right-side region,
+  - includes 10% tolerance of available right-side dock space.
+- Hidden behavior while docked:
+  - Desktop: card remains partially visible (slice).
+  - Mobile: card hidden, gray bubble visible.
+- Hover behavior while docked:
+  - Desktop hover reveals full card.
+  - Leaving hover hides it again (if still docked).
 
-## Potential Issues / Risks
+## Audio / Autoplay Rules Implemented
 
-- Fullscreen API behavior may vary on iOS Safari and WebView contexts.
-- `requestFullscreen` on iframe may be blocked in some browser/security contexts.
-- YouTube metadata (`getVideoData`) can be unavailable temporarily on certain loading timings.
-- Mobile drag and tap-to-toggle controls can conflict in edge cases with very quick gestures.
-- The component patches browser history methods for SPA detection; other scripts may also patch them.
+- `startOnLoad` autoplay remains active.
+- There is no public `muted` prop in schema/default props.
+- Docked audio behavior:
+  - if autoplay starts while docked, video starts muted,
+  - mouse over on dock-revealed card unmutes,
+  - mouse leave while still docked mutes again.
+- This behavior is documented in schema description for `startOnLoad`.
 
-## Known Technical Debt
+## Widget UX and Core Behavior (kept)
 
-- Main component is large and combines:
-  - player lifecycle
-  - drag/resize
-  - desktop UI controls
-  - mobile UI controls
-  Consider extracting into:
-  - `useYoutubePlayer` hook
-  - `useWidgetDragResize` hook
-  - `MobileControls` and `DesktopControls` components
-- Inline styles are extensive; moving to CSS handles or scoped style map would improve maintainability.
+- Draggable widget (ignores interactive controls while dragging).
+- Desktop resize by edges/corners with 9:16 ratio preserved.
+- Mobile fixed-size mode under `<1024px`.
+- Hover/tap controls:
+  - Desktop hover controls with progress/play/pause/volume.
+  - Mobile tap controls with auto-hide.
+- YouTube metadata header (title/author) overlay.
+- Loop support (`looping`) with ended-state fallback replay.
+- SPA route reset/reload handling:
+  - internal state reset on route transitions.
 
-## Test Plan Pending
+## Schema / Config Notes
 
-### Functional
+- Public schema props currently include:
+  - `shortsUrl`, `startOnLoad`, `closable`, `looping`,
+  - `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY`,
+  - `mobileAnchor`, `mobileOffsetX`, `mobileOffsetY`.
+- Dock-specific constants remain internal code config (not schema props):
+  - `DOCK_ACTIVATION_MAX_WIDTH`,
+  - `DOCK_VISIBLE_SLICE_RATIO`,
+  - dock region tolerance calculation.
 
-- Desktop:
-  - Drag works across viewport bounds.
-  - Resize works from edges/corners and keeps 9:16 ratio.
-  - Controls appear on hover and remain visible while paused.
-  - Metadata header appears on hover.
-- Mobile (`<1024px`):
-  - Drag works reliably on touch.
-  - Resize gestures do not change size.
-  - Controls appear on tap and auto-hide.
-  - Fullscreen button enters/exits fullscreen.
-  - Play/pause, seek and volume controls work after repeated interactions.
+## Known Trade-offs / Follow-ups
 
-### Navigation / Lifecycle
+- Dock rules are intentionally code-driven and not exposed in Site Editor.
+- Component remains large (player lifecycle + drag/resize + dock + controls in one file).
+- Future improvement:
+  - split into hooks/components (`useDockBehavior`, `useYoutubePlayer`, etc.),
+  - optionally expose some dock constants as advanced props.
 
-- Reload page and verify position resets to configured anchor/offset.
-- Navigate between SPA pages and confirm:
-  - Widget reinitializes correctly
-  - Position resets correctly
-  - No duplicated players or orphaned iframe instances
-
-### Compatibility
-
-- Chrome desktop/mobile emulation
-- Safari iOS
-- Samsung Internet / Android Chrome
-- VTEX store environment with real production scripts
-
-## Regression Checks Recommended
-
-- `closable` still unmounts widget and destroys player safely.
-- `startOnLoad=false` still waits for click/tap to mount iframe.
-- `muted` and volume synchronization still behave correctly.
-- `looping` still restarts playback on `ENDED`.
-
-## Notes For Next Iteration
-
-- Prioritize browser matrix tests for fullscreen and touch drag.
-- If mobile UX still feels crowded, evaluate:
-  - larger controls
-  - reduced control set in compact mode
-  - separate mobile control row with fewer actions

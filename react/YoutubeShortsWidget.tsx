@@ -8,8 +8,6 @@ type YoutubeShortsWidgetProps = {
   shortsUrl: string
   /** Se true, monta o iframe assim que o componente carregar na PDP. */
   startOnLoad: boolean
-  /** Se true, o embed inicia mutado (ajuda autoplay). */
-  muted: boolean
   /** Se true, mostra o botão X e permite “matar” o iframe (unmount). */
   closable: boolean
   /** Se true, ao terminar o vídeo ele reinicia automaticamente em loop. */
@@ -39,6 +37,14 @@ function clamp(n: number, min: number, max: number) {
 function isMobileViewport() {
   if (typeof window === 'undefined') return false
   return window.innerWidth < 1024
+}
+
+// Regra para ativar o comportamento de “doca escondida”.
+const DOCK_ACTIVATION_MAX_WIDTH = 1620
+
+function isDockModeViewport() {
+  if (typeof window === 'undefined') return false
+  return window.innerWidth < DOCK_ACTIVATION_MAX_WIDTH
 }
 
 function getInitialPosFromAnchor(
@@ -189,7 +195,6 @@ function buildYoutubeEmbedUrl(
 const YoutubeShortsWidget: any = ({
   shortsUrl,
   startOnLoad,
-  muted,
   closable,
   looping,
   desktopAnchor,
@@ -204,15 +209,19 @@ const YoutubeShortsWidget: any = ({
   const playerRef = useRef<any>(null)
 
   const ASPECT_RATIO_W_H = 9 / 16
-  const MIN_WIDTH = 220
+  // const MIN_WIDTH = 220
+  const MIN_WIDTH = 200
   const MAX_WIDTH = 520
-  const MOBILE_FIXED_WIDTH = 220
+  // const MOBILE_FIXED_WIDTH = 220
+  const MOBILE_FIXED_WIDTH = 150
   const LONG_PRESS_MS = 180
   const TAP_MOVE_TOLERANCE_PX = 8
 
   const [size, setSize] = useState<{ width: number; height: number }>(() => ({
-    width: 280,
-    height: Math.round(280 / ASPECT_RATIO_W_H),
+    // width: 280,
+    // height: Math.round(280 / ASPECT_RATIO_W_H),
+    width: 200,
+    height: Math.round(200 / ASPECT_RATIO_W_H),
   }))
 
   const videoId = useMemo(() => extractYoutubeVideoId(shortsUrl), [shortsUrl])
@@ -235,10 +244,31 @@ const YoutubeShortsWidget: any = ({
     currentTime: 0,
     duration: 0,
   })
-  const [volume, setVolume] = useState<number>(muted ? 0 : 100)
+  const [volume, setVolume] = useState<number>(100)
   const [videoMeta, setVideoMeta] = useState<VideoMeta>({ title: '', author: '' })
   const [isMobile, setIsMobile] = useState<boolean>(() => isMobileViewport())
+  const [isDockMode, setIsDockMode] = useState<boolean>(() => isDockModeViewport())
   const [mobileControlsVisible, setMobileControlsVisible] = useState(false)
+
+  // Dock no mobile: fica escondido e só aparece quando o mouse passa na “alça”.
+  const [isDocked, setIsDocked] = useState(false)
+  const [isDockHovering, setIsDockHovering] = useState(false)
+  const isDockedRef = useRef(isDocked)
+  const dockHideTimerRef = useRef<number | null>(null)
+  const dockPosRef = useRef<Pos>({ left: 0, top: 0 })
+  const dockHoverIgnoreUntilRef = useRef<number>(0)
+
+  const DOCK_HANDLE_HEIGHT_PX = 96
+  // const DOCK_VISIBLE_SLICE_RATIO = 0.25 - valor ideal para ideal inicial
+  const DOCK_VISIBLE_SLICE_RATIO = 0.35
+  // const DOCK_VISIBLE_SLICE_MIN_PX = 14
+  const DOCK_VISIBLE_SLICE_MIN_PX = 52
+  // const DOCK_BUBBLE_TEXT = 'Shorts'
+  const DOCK_BUBBLE_CONTENT = (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
+      <path d="M2.5 3.5a.5.5 0 0 1 0-1h11a.5.5 0 0 1 0 1zm2-2a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1zM0 13a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 16 13V6a1.5 1.5 0 0 0-1.5-1.5h-13A1.5 1.5 0 0 0 0 6zm6.258-6.437a.5.5 0 0 1 .507.013l4 2.5a.5.5 0 0 1 0 .848l-4 2.5A.5.5 0 0 1 6 12V7a.5.5 0 0 1 .258-.437" />
+    </svg>
+  )
 
   // Posição do card (fixo com scroll).
   const [pos, setPos] = useState<Pos>({ left: 16, top: 16 })
@@ -341,10 +371,22 @@ const YoutubeShortsWidget: any = ({
     const width = rect.width || 280
     const height = rect.height || 480
     const mobile = isMobileViewport()
+    const dockModeNow = isDockModeViewport()
     const anchor = mobile ? mobileAnchor : desktopAnchor
     const offsetX = mobile ? mobileOffsetX : desktopOffsetX
     const offsetY = mobile ? mobileOffsetY : desktopOffsetY
-    setPos(getInitialPosFromAnchor(anchor, offsetX, offsetY, width, height))
+    if (dockModeNow) {
+      // Lado direito da tela, centralizado verticalmente
+      const left = window.innerWidth - width - offsetX
+      const top = (window.innerHeight - height) / 2
+      setPos({ left: clamp(left, 0, window.innerWidth - width), top: clamp(top, 0, window.innerHeight - height) })
+      setIsDocked(true)
+      setIsDockHovering(false)
+    } else {
+      setPos(getInitialPosFromAnchor(anchor, offsetX, offsetY, width, height))
+      setIsDocked(false)
+      setIsDockHovering(false)
+    }
   }, [
     desktopAnchor,
     desktopOffsetX,
@@ -363,9 +405,15 @@ const YoutubeShortsWidget: any = ({
   useEffect(() => {
     const onResize = () => {
       const mobileNow = isMobileViewport()
+      const dockModeNow = isDockModeViewport()
       setIsMobile(mobileNow)
+      setIsDockMode(dockModeNow)
+      if (!dockModeNow) {
+        setIsDocked(false)
+        setIsDockHovering(false)
+      }
       if (mobileNow) {
-        const safeWidth = Math.max(180, Math.min(MOBILE_FIXED_WIDTH, window.innerWidth - 24))
+        const safeWidth = Math.max(140, Math.min(MOBILE_FIXED_WIDTH, window.innerWidth - 24))
         const nextHeight = Math.round(safeWidth / ASPECT_RATIO_W_H)
         setSize({ width: safeWidth, height: nextHeight })
       }
@@ -386,10 +434,61 @@ const YoutubeShortsWidget: any = ({
 
   useEffect(() => {
     if (!isMobile) return
-    const safeWidth = Math.max(180, Math.min(MOBILE_FIXED_WIDTH, window.innerWidth - 24))
+    const safeWidth = Math.max(140, Math.min(MOBILE_FIXED_WIDTH, window.innerWidth - 24))
     const nextHeight = Math.round(safeWidth / ASPECT_RATIO_W_H)
     setSize({ width: safeWidth, height: nextHeight })
   }, [isMobile])
+
+  const dockAnchor: Anchor = isMobile ? mobileAnchor : desktopAnchor
+  const dockOffsetX = isMobile ? mobileOffsetX : desktopOffsetX
+
+  // Dock position: lado direito (com offsetX) e centralizado verticalmente.
+  const dockPos = useMemo(() => {
+    if (typeof window === 'undefined') return { left: pos.left, top: pos.top }
+    const rightEdgeX = window.innerWidth - dockOffsetX
+    const left = clamp(rightEdgeX - size.width, 0, window.innerWidth - size.width)
+    const top = (window.innerHeight - size.height) / 2
+    const clampedTop = clamp(top, 0, window.innerHeight - size.height)
+
+    return { left, top: clampedTop }
+  }, [dockAnchor, dockOffsetX, size.width, size.height, pos.left, pos.top])
+
+  // Sync de refs (evita stale closure).
+  isDockedRef.current = isDocked
+  dockPosRef.current = dockPos
+
+  // A dock “fecha” o card quando estiver acoplado.
+  // - mobile: esconde tudo (mantém apenas a bolinha cinza)
+  // - desktop: mostra só um sliver até passar o mouse na alça
+  const dockCardHiddenForUI =
+    isDockMode && isDocked && (isMobile ? true : !isDockHovering)
+
+  const cancelDockHide = useCallback(() => {
+    if (dockHideTimerRef.current == null) return
+    window.clearTimeout(dockHideTimerRef.current)
+    dockHideTimerRef.current = null
+  }, [])
+
+  const scheduleDockHide = useCallback(() => {
+    if (!isDockMode) return
+    cancelDockHide()
+    dockHoverIgnoreUntilRef.current = performance.now() + 200
+    dockHideTimerRef.current = window.setTimeout(() => {
+      // Se não estiver mais acoplado, não faz sentido esconder.
+      if (!isDockedRef.current) return
+      setIsDockHovering(false)
+      dockHideTimerRef.current = null
+    }, 120)
+  }, [cancelDockHide, isDockMode])
+
+  // Observação: não reposicionamos o widget para o dock quando ele esconde.
+  // Assim, após arrastar e soltar, “tirar o mouse” não força snap de volta.
+
+  const dockHandleHeight = Math.max(44, Math.min(DOCK_HANDLE_HEIGHT_PX, size.height))
+  const handlePos = dockPos
+  // Bubble centralizada verticalmente no “lado direito” do widget.
+  const dockHandleTop = handlePos.top + (size.height - dockHandleHeight) / 2
+  const dockHandleLeft = handlePos.left + (size.width - dockHandleHeight)
 
   const shouldMountIframe = !!videoId && !isClosed && (startOnLoad || isPlaying)
   const autoplay = startOnLoad || isPlaying
@@ -397,8 +496,8 @@ const YoutubeShortsWidget: any = ({
   const embedUrl = useMemo(() => {
     if (!videoId) return null
     const origin = typeof window !== 'undefined' ? window.location.origin : undefined
-    return buildYoutubeEmbedUrl(videoId, { muted, autoplay, looping, origin })
-  }, [videoId, muted, autoplay, looping])
+    return buildYoutubeEmbedUrl(videoId, { muted: false, autoplay, looping, origin })
+  }, [videoId, autoplay, looping])
 
   const onClose = useCallback(() => {
     setIsClosed(true)
@@ -735,9 +834,33 @@ const YoutubeShortsWidget: any = ({
         }
       }
 
+      // Dock snap: soltar arrastando perto do dock => fica “acoplado”.
+      if (!isTap && isDockMode) {
+        const current = posRef.current
+        const dock = dockPosRef.current
+
+        // A doca considera “todo o espaço do canto direito” com tolerancia de 10%
+        // do espaço disponível entre o meio da tela e o lado direito.
+        const currentRightEdge = current.left + size.width
+        const dockRightEdge = dock.left + size.width
+        const regionLeftX = window.innerWidth / 2
+        const regionWidth = Math.max(0, dockRightEdge - regionLeftX)
+        const dockRightEdgeMin = dockRightEdge - regionWidth * 0.1
+        const shouldDock = currentRightEdge >= dockRightEdgeMin
+
+        if (shouldDock) {
+          setIsDocked(true)
+          setIsDockHovering(false)
+          setPos(dock)
+        } else if (isDockedRef.current) {
+          setIsDocked(false)
+          setIsDockHovering(false)
+        }
+      }
+
       e.preventDefault()
     },
-    [isMobile, isVideoPlaying],
+    [isDockMode, isVideoPlaying, size.width],
   )
 
   // Mantém o widget dentro dos limites da janela ao redimensionar.
@@ -783,8 +906,13 @@ const YoutubeShortsWidget: any = ({
             }
 
             try {
-              if (muted) player.mute?.()
-              else player.unMute?.()
+              // Regra única de áudio:
+              // se a página carregar com o vídeo acoplado na doca, inicia com volume visual 0.
+              const shouldStartWithVolumeZero = isDockModeViewport() && isDockedRef.current
+              if (shouldStartWithVolumeZero) {
+                player.setVolume?.(0)
+                setVolume(0)
+              }
             } catch {
               // noop
             }
@@ -835,36 +963,7 @@ const YoutubeShortsWidget: any = ({
       playerRef.current = null
     }
     // Dependências: recria quando o iframe é forçado por `spaKey`/troca de vídeo.
-  }, [shouldMountIframe, videoId, spaKey, muted, looping])
-
-  // Mantém mute sincronizado com `muted`.
-  useEffect(() => {
-    if (!playerReady) return
-    const p = playerRef.current
-    if (!p) return
-
-    if (muted) {
-      try {
-        p.mute?.()
-      } catch {
-        // noop
-      }
-      setVolume(0)
-    } else {
-      try {
-        p.unMute?.()
-      } catch {
-        // noop
-      }
-      try {
-        const v = p.getVolume?.()
-        if (typeof v === 'number' && !Number.isNaN(v)) setVolume(v)
-        else setVolume(100)
-      } catch {
-        setVolume(100)
-      }
-    }
-  }, [playerReady, muted])
+  }, [shouldMountIframe, videoId, spaKey, looping])
 
   // Atualiza progresso/volume enquanto o usuário está no hover.
   useEffect(() => {
@@ -963,382 +1062,509 @@ const YoutubeShortsWidget: any = ({
   const progressPercent = progress.duration
     ? clamp(progress.currentTime / progress.duration, 0, 1) * 100
     : 0
-  const shouldShowControls = shouldMountIframe && (isMobile ? mobileControlsVisible : isHovering || !isVideoPlaying)
-  const shouldShowHeader = shouldMountIframe && (isMobile ? mobileControlsVisible : isHovering)
+  const dockCardHiddenMobile = isDockMode && isMobile && isDocked
+  const dockCardHiddenDesktop = !isMobile && isDockMode && isDocked && !isDockHovering
+  const dockVisibleSliceWidth = Math.max(
+    DOCK_VISIBLE_SLICE_MIN_PX,
+    Math.round(size.width * DOCK_VISIBLE_SLICE_RATIO),
+  )
+  const dockHiddenTranslateXPx = dockCardHiddenDesktop
+    ? Math.max(0, size.width - dockVisibleSliceWidth)
+    : 0
+
+  // Quando a doca está “fechada”, evita mostrar overlays (header/controls).
+  const shouldShowControls =
+    shouldMountIframe &&
+    !dockCardHiddenForUI &&
+    (isMobile ? mobileControlsVisible : isHovering || !isVideoPlaying)
+  const shouldShowHeader = shouldMountIframe && !dockCardHiddenForUI && (isMobile ? mobileControlsVisible : isHovering)
 
   if (!videoId) return null
   if (isClosed) return null
 
   return (
-    <div
-      ref={cardRef}
-      style={{
-        position: 'fixed',
-        left: pos.left,
-        top: pos.top,
-        width: size.width,
-        height: size.height,
-        zIndex: 9999,
-        overflow: 'visible',
-        background: 'transparent',
-        touchAction: 'none',
-        cursor: isMobile ? 'grab' : resizeCursor || 'grab',
-      }}
-      aria-label="YouTube Shorts widget"
-      onMouseEnter={() => setIsHovering(true)}
-      onMouseLeave={() => {
-        setIsHovering(false)
-        setIsVolumeHovering(false)
-        setResizeCursor(null)
-        lastResizeCursorRef.current = null
-      }}
-      onPointerDown={onPointerDownCard}
-      onPointerMove={onPointerMoveCard}
-      onPointerUp={onPointerUpCard}
-      onClick={() => {
-        if (!isMobile || !shouldMountIframe) return
-        showMobileControls()
-      }}
-    >
-      {closable ? (
-        <button
-          type="button"
+    <>
+      {/* Desktop: alça transparente para revelar o widget quando estiver acoplado */}
+      {isDockMode && !isMobile && isDocked ? (
+        <div
           data-no-drag="true"
-          onClick={onClose}
-          onMouseEnter={() => setIsCloseBtnHovering(true)}
-          onMouseLeave={() => setIsCloseBtnHovering(false)}
-          aria-label="Fechar"
+          aria-hidden="true"
+          onMouseEnter={() => {
+            cancelDockHide()
+            if (performance.now() < dockHoverIgnoreUntilRef.current) return
+            setIsDockHovering(true)
+          }}
+          onMouseLeave={() => {
+            scheduleDockHide()
+          }}
           style={{
-            position: 'absolute',
-            // left: -12,
-            // top: -10,
-            left: -14,
-            top: -14,
+            position: 'fixed',
+            left: dockPos.left + (size.width - dockVisibleSliceWidth),
+            top: dockPos.top,
+            width: dockVisibleSliceWidth,
+            height: size.height,
             zIndex: 10000,
-            width: 32,
-            height: 32,
-            borderRadius: 999,
-            border: 'none',
-            background: 'unset',
-            // border: '1px solid rgba(255,255,255,0.25)',
-            // background: 'rgba(0,0,0,0.6)',
-            color: isCloseBtnHovering ? '#f90041' : '#fff',
+            pointerEvents: dockCardHiddenDesktop ? 'auto' : 'none',
+            background: 'transparent',
             cursor: 'pointer',
-            padding: 0,
-            transition: 'color .3s ease-in-out',
-            // fontSize: 16,
-            lineHeight: '32px',
+          }}
+        />
+      ) : null}
+
+      {/* Dock: mobile mostra bolinha cinza (e pode ter texto). Acima de 1024 revela sliver. */}
+      {isDockMode && isMobile && isDocked ? (
+        <div
+          data-no-drag="true"
+          role="button"
+          aria-label="Abrir Shorts"
+          onClick={() => {
+            setIsDocked(false)
+            showMobileControls()
+          }}
+          style={{
+            position: 'fixed',
+            left: dockHandleLeft,
+            top: dockHandleTop,
+            width: dockHandleHeight,
+            height: dockHandleHeight,
+            zIndex: 10000,
+            pointerEvents: 'auto',
+            background: 'rgba(0,0,0,0.35)',
+            borderRadius: 999,
+            boxShadow: '0 0 0 1px rgba(255,255,255,0.08) inset',
+            cursor: 'pointer',
+            opacity: 1,
+            transition: 'opacity .2s ease-in-out',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 4,
           }}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
-            <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0M5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293z" />
-          </svg>
-        </button>
+          <div
+            data-no-drag="true"
+            style={{
+              color: '#fff',
+              fontSize: 12,
+              fontWeight: 800,
+              lineHeight: '14px',
+              opacity: 0.95,
+              textShadow: '0 1px 2px rgba(0,0,0,0.45)',
+              userSelect: 'none',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {DOCK_BUBBLE_CONTENT}
+          </div>
+        </div>
       ) : null}
 
       <div
+        ref={cardRef}
         style={{
-          width: '100%',
-          height: '100%',
-          borderRadius: 12,
-          overflow: 'hidden',
-          position: 'relative',
-          background: '#000',
+          position: 'fixed',
+          left: pos.left,
+          top: pos.top,
+          width: size.width,
+          height: size.height,
+          zIndex: 9999,
+          overflow: 'visible',
+          background: 'transparent',
+          touchAction: 'none',
+          cursor: isMobile ? 'grab' : resizeCursor || 'grab',
+          transform: `translateX(${dockHiddenTranslateXPx}px)`,
+          opacity: dockCardHiddenMobile ? 0 : 1,
+          pointerEvents: dockCardHiddenMobile || dockCardHiddenDesktop ? 'none' : 'auto',
+          transition: 'transform .2s ease-in-out, opacity .2s ease-in-out',
+        }}
+        aria-label="YouTube Shorts widget"
+        onMouseEnter={() => {
+          setIsHovering(true)
+          if (isDockMode && isDockedRef.current) {
+            cancelDockHide()
+            if (performance.now() >= dockHoverIgnoreUntilRef.current) {
+              setIsDockHovering(true)
+            }
+          }
+        }}
+        onMouseLeave={() => {
+          setIsHovering(false)
+          setIsVolumeHovering(false)
+          setResizeCursor(null)
+          lastResizeCursorRef.current = null
+
+          if (isDockMode && isDockedRef.current) scheduleDockHide()
+        }}
+        onPointerDown={onPointerDownCard}
+        onPointerMove={onPointerMoveCard}
+        onPointerUp={onPointerUpCard}
+        onClick={() => {
+          if (!isMobile || !shouldMountIframe) return
+          showMobileControls()
         }}
       >
-        {shouldMountIframe && embedUrl ? (
-          <iframe
-            key={`${videoId}-${spaKey}`}
-            title="YouTube Shorts"
-            src={embedUrl}
-            ref={iframeRef}
-            id={`ytw-${videoId}-${spaKey}`}
-            style={{
-              position: 'absolute',
-              zIndex: 0,
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              border: 0,
-            }}
-            allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-            allowFullScreen
-            loading={startOnLoad ? 'eager' : 'lazy'}
-            referrerPolicy="strict-origin-when-cross-origin"
-          />
-        ) : (
+        {closable ? (
           <button
             type="button"
-            onClick={onPlay}
             data-no-drag="true"
-            aria-label="Iniciar vídeo"
+            onClick={onClose}
+            onMouseEnter={() => setIsCloseBtnHovering(true)}
+            onMouseLeave={() => setIsCloseBtnHovering(false)}
+            aria-label="Fechar"
             style={{
               position: 'absolute',
-              inset: 0,
-              border: 0,
+              // left: -12,
+              // top: -10,
+              left: -14,
+              top: -14,
+              zIndex: 10000,
+              width: 32,
+              height: 32,
+              borderRadius: 999,
+              // border: '1px solid rgba(255,255,255,0.25)',
+              border: 'none',
+              // background: 'rgba(0,0,0,0.6)',
+              // background: 'unset',
+              background: '#1614133d',
+              color: isCloseBtnHovering ? '#f90041' : '#fff',
               cursor: 'pointer',
-              background:
-                'linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))',
-              color: 'white',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: 16,
-              fontWeight: 700,
+              padding: 0,
+              transition: 'color .3s ease-in-out',
+              // fontSize: 16,
+              lineHeight: '32px',
+              boxShadow: '0 0 8px #1614133d',
             }}
           >
-            Tocar para iniciar
+            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
+              <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0M5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293z" />
+            </svg>
           </button>
-        )}
-
-        {/* Controles no hover (progresso + play/pause + volume) */}
-        {shouldMountIframe ? (
-          <div
-            aria-hidden="true"
-            style={{
-              position: 'absolute',
-              inset: 0,
-              zIndex: 1,
-              background: 'transparent',
-            }}
-          />
         ) : null}
 
-        {shouldMountIframe ? (
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              zIndex: 2,
-              padding: '10px 10px 14px',
-              background: 'linear-gradient(180deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 100%)',
-              opacity: shouldShowHeader ? 1 : 0,
-              transition: 'opacity .3s ease-in-out',
-              pointerEvents: 'none',
-            }}
-          >
-            <div style={{ color: '#fff', fontSize: 13, fontWeight: 700, lineHeight: '18px' }}>
-              {videoMeta.title || 'YouTube Shorts'}
-            </div>
-            {videoMeta.author ? (
-              <div style={{ color: 'rgba(255,255,255,0.86)', fontSize: 12, lineHeight: '16px' }}>
-                {videoMeta.author}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {shouldMountIframe ? (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              zIndex: 3,
-              background: 'transparent',
-              opacity: shouldShowControls ? 1 : 0,
-              transition: 'opacity .3s ease-in-out',
-              pointerEvents: shouldShowControls ? 'auto' : 'none',
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'flex-end',
-            }}
-          >
-            <div
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            borderRadius: 12,
+            overflow: 'hidden',
+            position: 'relative',
+            background: '#000',
+          }}
+        >
+          {shouldMountIframe && embedUrl ? (
+            <iframe
+              key={`${videoId}-${spaKey}`}
+              title="YouTube Shorts"
+              src={embedUrl}
+              ref={iframeRef}
+              id={`ytw-${videoId}-${spaKey}`}
               style={{
-                padding: 8,
-                paddingBottom: 10,
-                background: 'linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 100%)',
+                position: 'absolute',
+                zIndex: 0,
+                inset: 0,
+                width: '100%',
+                height: '100%',
+                border: 0,
+              }}
+              allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+              allowFullScreen
+              loading={startOnLoad ? 'eager' : 'lazy'}
+              referrerPolicy="strict-origin-when-cross-origin"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={onPlay}
+              data-no-drag="true"
+              aria-label="Iniciar vídeo"
+              style={{
+                position: 'absolute',
+                inset: 0,
+                border: 0,
+                cursor: 'pointer',
+                background:
+                  'linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))',
+                color: 'white',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 16,
+                fontWeight: 700,
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                {/* Botão play/pause */}
-                <button
-                  type="button"
-                  data-no-drag="true"
-                  onClick={togglePlayPause}
-                  onMouseEnter={() => setIsPlayPauseBtnHovering(true)}
-                  onMouseLeave={() => setIsPlayPauseBtnHovering(false)}
-                  disabled={!playerReady}
-                  aria-label={isVideoPlaying ? 'Pause' : 'Play'}
-                  style={{
-                    pointerEvents: 'auto',
-                    width: 32,
-                    height: 32,
-                    borderRadius: 999,
-                    border: '1px solid rgba(255,255,255,0.25)',
-                    background: 'rgba(0,0,0,0.55)',
-                    color: isPlayPauseBtnHovering && playerReady ? '#f90041' : '#fff',
-                    cursor: playerReady ? 'pointer' : 'not-allowed',
-                    fontWeight: 800,
-                    fontSize: 16,
-                    lineHeight: '32px',
-                    transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
-                  }}
-                >
-                  {/* {isVideoPlaying ? '||' : '>'} */}
-                  {isVideoPlaying ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5" /></svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393" /></svg>
-                  )}
-                </button>
+              Tocar para iniciar
+            </button>
+          )}
 
-                {/* Botão de volume + slider vertical no hover */}
-                <div
-                  data-no-drag="true"
-                  style={{ position: 'relative' }}
-                  onMouseEnter={() => setIsVolumeHovering(true)}
-                  onMouseLeave={() => setIsVolumeHovering(false)}
-                >
-                  <button
-                    type="button"
-                    data-no-drag="true"
-                    onClick={() => {
-                      if (!playerReady) return
-                      const next = volume > 0 ? 0 : 50
-                      onVolumeChange(next)
-                    }}
-                    onMouseEnter={() => setIsVolumeBtnHovering(true)}
-                    onMouseLeave={() => setIsVolumeBtnHovering(false)}
-                    disabled={!playerReady}
-                    aria-label="Volume"
-                    style={{
-                      pointerEvents: 'auto',
-                      width: 32,
-                      height: 32,
-                      borderRadius: 999,
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(0,0,0,0.55)',
-                      color: isVolumeBtnHovering && playerReady ? '#f90041' : '#fff',
-                      cursor: playerReady ? 'pointer' : 'not-allowed',
-                      fontWeight: 800,
-                      fontSize: 14,
-                      lineHeight: '32px',
-                      transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
-                    }}
-                  >
-                    {/* {volume === 0 ? 'M' : 'V'} */}
-                    {volume === 0 ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06m7.137 2.096a.5.5 0 0 1 0 .708L12.207 8l1.647 1.646a.5.5 0 0 1-.708.708L11.5 8.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 8 9.146 6.354a.5.5 0 1 1 .708-.708L11.5 7.293l1.646-1.647a.5.5 0 0 1 .708 0" /></svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
-                        <path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303z" />
-                        <path d="M10.121 12.596A6.48 6.48 0 0 0 12.025 8a6.48 6.48 0 0 0-1.904-4.596l-.707.707A5.48 5.48 0 0 1 11.025 8a5.48 5.48 0 0 1-1.61 3.89z" />
-                        <path d="M8.707 11.182A4.5 4.5 0 0 0 10.025 8a4.5 4.5 0 0 0-1.318-3.182L8 5.525A3.5 3.5 0 0 1 9.025 8 3.5 3.5 0 0 1 8 10.475zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06" />
-                      </svg>
-                    )}
-                  </button>
+          {/* Controles no hover (progresso + play/pause + volume) */}
+          {shouldMountIframe ? (
+            <div
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 1,
+                background: 'transparent',
+              }}
+            />
+          ) : null}
 
-                  {isVolumeHovering ? (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        right: 0,
-                        // bottom: 46,
-                        bottom: 30,
-                        width: 36,
-                        height: 120,
-                        padding: 8,
-                        borderRadius: 10,
-                        background: 'rgba(0,0,0,0.65)',
-                        border: '1px solid rgba(255,255,255,0.14)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        transition: 'opacity .3s ease-in-out',
-                      }}
-                    >
-                      <input
-                        data-no-drag="true"
-                        type="range"
-                        min={0}
-                        max={100}
-                        step={1}
-                        value={volume}
-                        disabled={!playerReady}
-                        onChange={(e) =>
-                          onVolumeChange(Number((e.target as HTMLInputElement).value))
-                        }
-                        style={{
-                          accentColor: '#fff',
-                          width: 120,
-                          transform: 'rotate(-90deg)',
-                          transformOrigin: 'center',
-                        }}
-                        aria-label="Volume (vertical)"
-                      />
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Barra de progresso (cor branca) */}
-                {isMobile ? (
-                  <button
-                    type="button"
-                    data-no-drag="true"
-                    onClick={onToggleFullscreen}
-                    onMouseEnter={() => setIsFullscreenBtnHovering(true)}
-                    onMouseLeave={() => setIsFullscreenBtnHovering(false)}
-                    disabled={!playerReady}
-                    aria-label="Tela cheia"
-                    style={{
-                      pointerEvents: 'auto',
-                      width: 32,
-                      height: 32,
-                      borderRadius: 999,
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(0,0,0,0.55)',
-                      color: isFullscreenBtnHovering && playerReady ? '#f90041' : '#fff',
-                      cursor: playerReady ? 'pointer' : 'not-allowed',
-                      lineHeight: '32px',
-                      transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
-                    }}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
-                      <path d="M1 1h5v1H2v4H1zM10 1h5v5h-1V2h-4zM1 10h1v4h4v1H1zM14 10h1v5h-5v-1h4z" />
-                    </svg>
-                  </button>
-                ) : null}
-                <input
-                  data-no-drag="true"
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={0.1}
-                  value={progressPercent}
-                  disabled={!playerReady}
-                  onChange={(e) =>
-                    onSeekFromPercent(Number((e.target as HTMLInputElement).value))
-                  }
-                  style={{
-                    flex: 1,
-                    accentColor: '#fff',
-                  }}
-                  aria-label="Progresso"
-                />
+          {shouldMountIframe ? (
+            <div
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                zIndex: 2,
+                padding: '10px 10px 14px',
+                background: 'linear-gradient(180deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 100%)',
+                opacity: shouldShowHeader ? 1 : 0,
+                transition: 'opacity .3s ease-in-out',
+                pointerEvents: 'none',
+              }}
+            >
+              <div style={{ color: '#fff', fontSize: 13, fontWeight: 700, lineHeight: '18px' }}>
+                {videoMeta.title || 'YouTube Shorts'}
               </div>
-              {isMobile ? (
-                <div
-                  style={{
-                    marginTop: 8,
-                    display: 'flex',
-                    justifyContent: 'center',
-                    fontSize: 11,
-                    color: 'rgba(255,255,255,0.82)',
-                  }}
-                >
-                  Toque no widget para exibir os controles
+              {videoMeta.author ? (
+                <div style={{ color: 'rgba(255,255,255,0.86)', fontSize: 12, lineHeight: '16px' }}>
+                  {videoMeta.author}
                 </div>
               ) : null}
             </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
 
-      {/* Resize é por bordas/cantos (sem handle visual). */}
-    </div>
+          {shouldMountIframe ? (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 3,
+                background: 'transparent',
+                opacity: shouldShowControls ? 1 : 0,
+                transition: 'opacity .3s ease-in-out',
+                pointerEvents: shouldShowControls ? 'auto' : 'none',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'flex-end',
+              }}
+            >
+              <div
+                style={{
+                  padding: 8,
+                  paddingBottom: 10,
+                  background: 'linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 100%)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {/* Botão play/pause */}
+                  <button
+                    type="button"
+                    data-no-drag="true"
+                    onClick={togglePlayPause}
+                    onMouseEnter={() => setIsPlayPauseBtnHovering(true)}
+                    onMouseLeave={() => setIsPlayPauseBtnHovering(false)}
+                    disabled={!playerReady}
+                    aria-label={isVideoPlaying ? 'Pause' : 'Play'}
+                    style={{
+                      pointerEvents: 'auto',
+                      width: 32,
+                      height: 32,
+                      flexShrink: 0,
+                      borderRadius: 999,
+                      border: '1px solid rgba(255,255,255,0.25)',
+                      background: 'rgba(0,0,0,0.55)',
+                      color: isPlayPauseBtnHovering && playerReady ? '#f90041' : '#fff',
+                      cursor: playerReady ? 'pointer' : 'not-allowed',
+                      fontWeight: 800,
+                      fontSize: 16,
+                      lineHeight: '32px',
+                      transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
+                    }}
+                  >
+                    {/* {isVideoPlaying ? '||' : '>'} */}
+                    {isVideoPlaying ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5" /></svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393" /></svg>
+                    )}
+                  </button>
+
+                  {/* Componente único de volume: bolinha -> expande no hover */}
+                  <div
+                    data-no-drag="true"
+                    onMouseEnter={() => setIsVolumeHovering(true)}
+                    onMouseLeave={() => setIsVolumeHovering(false)}
+                    style={{
+                      position: 'relative',
+                      width: 36,
+                      height: 32,
+                      flexShrink: 0,
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: 0,
+                        bottom: 0,
+                        width: 36,
+                        height: isVolumeHovering ? 162 : 32,
+                        borderRadius: isVolumeHovering ? 18 : 999,
+                        border: '1px solid rgba(255,255,255,0.25)',
+                        background: 'rgba(0,0,0,0.55)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'flex-end',
+                        overflow: 'hidden',
+                        transition: 'height .22s ease-in-out, border-radius .22s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 36,
+                          height: isVolumeHovering ? 120 : 0,
+                          padding: isVolumeHovering ? 8 : 0,
+                          borderBottom: isVolumeHovering ? '1px solid rgba(255,255,255,0.14)' : 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          opacity: isVolumeHovering ? 1 : 0,
+                          transition: 'height .22s ease-in-out, opacity .18s ease-in-out, padding .22s ease-in-out',
+                        }}
+                      >
+                        <input
+                          data-no-drag="true"
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={volume}
+                          disabled={!playerReady}
+                          onChange={(e) =>
+                            onVolumeChange(Number((e.target as HTMLInputElement).value))
+                          }
+                          style={{
+                            accentColor: '#fff',
+                            width: 120,
+                            transform: 'rotate(-90deg)',
+                            transformOrigin: 'center',
+                          }}
+                          aria-label="Volume (vertical)"
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        data-no-drag="true"
+                        onClick={() => {
+                          if (!playerReady) return
+                          const next = volume > 0 ? 0 : 50
+                          onVolumeChange(next)
+                        }}
+                        onMouseEnter={() => setIsVolumeBtnHovering(true)}
+                        onMouseLeave={() => setIsVolumeBtnHovering(false)}
+                        disabled={!playerReady}
+                        aria-label="Volume"
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 999,
+                          border: 'none',
+                          background: 'transparent',
+                          color: isVolumeBtnHovering && playerReady ? '#f90041' : '#fff',
+                          cursor: playerReady ? 'pointer' : 'not-allowed',
+                          fontWeight: 800,
+                          fontSize: 14,
+                          lineHeight: '32px',
+                          flexShrink: 0,
+                          transition: 'color .3s ease-in-out',
+                        }}
+                      >
+                        {/* {volume === 0 ? 'M' : 'V'} */}
+                        {volume === 0 ? (
+                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06m7.137 2.096a.5.5 0 0 1 0 .708L12.207 8l1.647 1.646a.5.5 0 0 1-.708.708L11.5 8.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 8 9.146 6.354a.5.5 0 1 1 .708-.708L11.5 7.293l1.646-1.647a.5.5 0 0 1 .708 0" /></svg>
+                        ) : (
+                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
+                            <path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303z" />
+                            <path d="M10.121 12.596A6.48 6.48 0 0 0 12.025 8a6.48 6.48 0 0 0-1.904-4.596l-.707.707A5.48 5.48 0 0 1 11.025 8a5.48 5.48 0 0 1-1.61 3.89z" />
+                            <path d="M8.707 11.182A4.5 4.5 0 0 0 10.025 8a4.5 4.5 0 0 0-1.318-3.182L8 5.525A3.5 3.5 0 0 1 9.025 8 3.5 3.5 0 0 1 8 10.475zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06" />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Barra de progresso (cor branca) */}
+                  {isMobile ? (
+                    <button
+                      type="button"
+                      data-no-drag="true"
+                      onClick={onToggleFullscreen}
+                      onMouseEnter={() => setIsFullscreenBtnHovering(true)}
+                      onMouseLeave={() => setIsFullscreenBtnHovering(false)}
+                      disabled={!playerReady}
+                      aria-label="Tela cheia"
+                      style={{
+                        pointerEvents: 'auto',
+                        width: 32,
+                        height: 32,
+                        flexShrink: 0,
+                        borderRadius: 999,
+                        border: '1px solid rgba(255,255,255,0.25)',
+                        background: 'rgba(0,0,0,0.55)',
+                        color: isFullscreenBtnHovering && playerReady ? '#f90041' : '#fff',
+                        cursor: playerReady ? 'pointer' : 'not-allowed',
+                        lineHeight: '32px',
+                        transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
+                      }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
+                        <path d="M1 1h5v1H2v4H1zM10 1h5v5h-1V2h-4zM1 10h1v4h4v1H1zM14 10h1v5h-5v-1h4z" />
+                      </svg>
+                    </button>
+                  ) : null}
+                  <input
+                    data-no-drag="true"
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    value={progressPercent}
+                    disabled={!playerReady}
+                    onChange={(e) =>
+                      onSeekFromPercent(Number((e.target as HTMLInputElement).value))
+                    }
+                    style={{
+                      flex: 1,
+                      accentColor: '#fff',
+                    }}
+                    aria-label="Progresso"
+                  />
+                </div>
+                {isMobile ? (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      display: 'flex',
+                      justifyContent: 'center',
+                      fontSize: 11,
+                      color: 'rgba(255,255,255,0.82)',
+                    }}
+                  >
+                    Toque no widget para exibir os controles
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Resize é por bordas/cantos (sem handle visual). */}
+      </div>
+    </>
   )
 }
 
@@ -1361,12 +1587,6 @@ YoutubeShortsWidget.schema = {
         'Se desativado, o vídeo só carrega quando o usuário tocar em “Tocar para iniciar”.',
       default: true,
     },
-    muted: {
-      type: 'boolean',
-      title: 'Iniciar mutado',
-      description: 'Recomendado para autoplay.',
-      default: true,
-    },
     closable: {
       type: 'boolean',
       title: 'Permitir fechar (botão X)',
@@ -1379,52 +1599,19 @@ YoutubeShortsWidget.schema = {
       description: 'Se ativado, ao terminar o vídeo ele recomeça automaticamente.',
       default: true,
     },
-    desktopAnchor: {
-      type: 'string',
-      title: 'Posição inicial no desktop',
-      enum: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
-      enumNames: ['Superior esquerda', 'Superior direita', 'Inferior esquerda', 'Inferior direita'],
-      default: 'bottom-right',
-    },
-    desktopOffsetX: {
-      type: 'number',
-      title: 'Offset X no desktop (px)',
-      default: 16,
-    },
-    desktopOffsetY: {
-      type: 'number',
-      title: 'Offset Y no desktop (px)',
-      default: 16,
-    },
-    mobileAnchor: {
-      type: 'string',
-      title: 'Posição inicial no mobile (<1024px)',
-      enum: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
-      enumNames: ['Superior esquerda', 'Superior direita', 'Inferior esquerda', 'Inferior direita'],
-      default: 'bottom-right',
-    },
-    mobileOffsetX: {
-      type: 'number',
-      title: 'Offset X no mobile (px)',
-      default: 12,
-    },
-    mobileOffsetY: {
-      type: 'number',
-      title: 'Offset Y no mobile (px)',
-      default: 12,
-    },
   },
 }
 
 YoutubeShortsWidget.defaultProps = {
   shortsUrl: '',
   startOnLoad: true,
-  muted: true,
   closable: true,
   looping: true,
   desktopAnchor: 'bottom-right',
-  desktopOffsetX: 16,
-  desktopOffsetY: 16,
+  // desktopOffsetX: 16,
+  // desktopOffsetY: 16,
+  desktopOffsetX: 32,
+  desktopOffsetY: 32,
   mobileAnchor: 'bottom-right',
   mobileOffsetX: 12,
   mobileOffsetY: 12,
