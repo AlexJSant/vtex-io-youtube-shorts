@@ -1,4 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import useDock from './useDock'
+import useDragResize from './useDragResize'
+import useYouTubePlayer from './useYouTubePlayer'
 
 type YoutubeShortsWidgetProps = {
   /**
@@ -27,7 +30,6 @@ type YoutubeShortsWidgetProps = {
 }
 
 type Pos = { left: number; top: number }
-type VideoMeta = { title: string; author: string }
 type Anchor = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
 
 function clamp(n: number, min: number, max: number) {
@@ -41,6 +43,39 @@ function isMobileViewport() {
 
 // Regra para ativar o comportamento de “doca escondida”.
 const DOCK_ACTIVATION_MAX_WIDTH = 1620
+const ASPECT_RATIO_W_H = 9 / 16
+const MOBILE_FIXED_WIDTH = 150
+const DOCK_VISIBLE_SLICE_RATIO = 0.35
+const DOCK_VISIBLE_SLICE_MIN_PX = 52
+const DEFAULT_INITIAL_VOLUME = 20
+
+/**
+ * Mobile — “bolinha cinza” quando o widget está acoplado (doca).
+ * Ajuste tamanho, cor e deslocamento fino em relação à borda direita do card.
+ */
+const MOBILE_DOCK_BUBBLE_SIZE_PX = 96
+const MOBILE_DOCK_BUBBLE_OFFSET_X_PX = 0
+const MOBILE_DOCK_BUBBLE_OFFSET_Y_PX = 0
+const MOBILE_DOCK_BUBBLE_BACKGROUND = 'rgba(0,0,0,0.35)'
+const MOBILE_DOCK_BUBBLE_ICON_SIZE_PX = 16
+/** Camada mobile “tela cheia” (acima da bolinha zIndex 10000). */
+const MOBILE_EXPAND_Z = 100005
+const MOBILE_EXPAND_CLOSE_Z = 100006
+
+function DockBubbleIcon({ sizePx }: { sizePx: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={sizePx}
+      height={sizePx}
+      fill="currentColor"
+      viewBox="0 0 16 16"
+      style={{ pointerEvents: 'none' }}
+    >
+      <path d="M2.5 3.5a.5.5 0 0 1 0-1h11a.5.5 0 0 1 0 1zm2-2a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1zM0 13a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 16 13V6a1.5 1.5 0 0 0-1.5-1.5h-13A1.5 1.5 0 0 0 0 6zm6.258-6.437a.5.5 0 0 1 .507.013l4 2.5a.5.5 0 0 1 0 .848l-4 2.5A.5.5 0 0 1 6 12V7a.5.5 0 0 1 .258-.437" />
+    </svg>
+  )
+}
 
 function isDockModeViewport() {
   if (typeof window === 'undefined') return false
@@ -126,52 +161,16 @@ function extractYoutubeVideoId(input: string): string | null {
   return null
 }
 
-declare global {
-  interface Window {
-    YT?: any
-    onYouTubeIframeAPIReady?: () => void
-  }
-}
-
-let youtubeIframeApiLoading: Promise<void> | null = null
-
-function loadYouTubeIframeAPI() {
-  if (typeof window === 'undefined') return Promise.resolve()
-  const w = window as Window
-
-  if (w.YT?.Player) return Promise.resolve()
-  if (youtubeIframeApiLoading) return youtubeIframeApiLoading
-
-  youtubeIframeApiLoading = new Promise<void>((resolve) => {
-    // Caso o script já tenha sido carregado em outra instância.
-    const existing = document.querySelector(
-      'script[src="https://www.youtube.com/iframe_api"]',
-    ) as HTMLScriptElement | null
-
-    const prev = w.onYouTubeIframeAPIReady
-    w.onYouTubeIframeAPIReady = () => {
-      try {
-        prev?.()
-      } catch {
-        // noop
-      }
-      resolve()
-    }
-
-    if (!existing) {
-      const script = document.createElement('script')
-      script.src = 'https://www.youtube.com/iframe_api'
-      script.async = true
-      document.head.appendChild(script)
-    }
-  })
-
-  return youtubeIframeApiLoading
-}
-
 function buildYoutubeEmbedUrl(
   videoId: string,
-  options: { muted: boolean; autoplay: boolean; looping: boolean; origin?: string },
+  options: {
+    muted: boolean
+    autoplay: boolean
+    looping: boolean
+    origin?: string
+    /** No mobile usamos controles nativos do player. */
+    youtubeControls: boolean
+  },
 ) {
   const params = new URLSearchParams()
   if (options.autoplay) params.set('autoplay', '1')
@@ -185,7 +184,7 @@ function buildYoutubeEmbedUrl(
   params.set('modestbranding', '1')
   params.set('rel', '0')
   params.set('showinfo', '0')
-  params.set('controls', '0')
+  params.set('controls', options.youtubeControls ? '1' : '0')
   params.set('enablejsapi', '1')
   if (options.origin) params.set('origin', options.origin)
 
@@ -206,16 +205,7 @@ const YoutubeShortsWidget: any = ({
 }: YoutubeShortsWidgetProps) => {
   const cardRef = useRef<HTMLDivElement | null>(null)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
-  const playerRef = useRef<any>(null)
-
-  const ASPECT_RATIO_W_H = 9 / 16
-  // const MIN_WIDTH = 220
-  const MIN_WIDTH = 200
-  const MAX_WIDTH = 520
-  // const MOBILE_FIXED_WIDTH = 220
-  const MOBILE_FIXED_WIDTH = 150
-  const LONG_PRESS_MS = 180
-  const TAP_MOVE_TOLERANCE_PX = 8
+  const mobileFullscreenShellRef = useRef<HTMLDivElement | null>(null)
 
   const [size, setSize] = useState<{ width: number; height: number }>(() => ({
     // width: 280,
@@ -228,47 +218,14 @@ const YoutubeShortsWidget: any = ({
 
   const [isClosed, setIsClosed] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [isVideoPlaying, setIsVideoPlaying] = useState(false)
 
   const [spaKey, setSpaKey] = useState(0)
   const [isHovering, setIsHovering] = useState(false)
   const [isVolumeHovering, setIsVolumeHovering] = useState(false)
-  const [isCloseBtnHovering, setIsCloseBtnHovering] = useState(false)
-  const [isPlayPauseBtnHovering, setIsPlayPauseBtnHovering] = useState(false)
-  const [isVolumeBtnHovering, setIsVolumeBtnHovering] = useState(false)
-  const [isFullscreenBtnHovering, setIsFullscreenBtnHovering] = useState(false)
-  const [resizeCursor, setResizeCursor] = useState<string | null>(null)
-  const lastResizeCursorRef = useRef<string | null>(null)
-  const [playerReady, setPlayerReady] = useState(false)
-  const [progress, setProgress] = useState<{ currentTime: number; duration: number }>({
-    currentTime: 0,
-    duration: 0,
-  })
-  const [volume, setVolume] = useState<number>(100)
-  const [videoMeta, setVideoMeta] = useState<VideoMeta>({ title: '', author: '' })
   const [isMobile, setIsMobile] = useState<boolean>(() => isMobileViewport())
   const [isDockMode, setIsDockMode] = useState<boolean>(() => isDockModeViewport())
-  const [mobileControlsVisible, setMobileControlsVisible] = useState(false)
-
-  // Dock no mobile: fica escondido e só aparece quando o mouse passa na “alça”.
-  const [isDocked, setIsDocked] = useState(false)
-  const [isDockHovering, setIsDockHovering] = useState(false)
-  const isDockedRef = useRef(isDocked)
-  const dockHideTimerRef = useRef<number | null>(null)
-  const dockPosRef = useRef<Pos>({ left: 0, top: 0 })
-  const dockHoverIgnoreUntilRef = useRef<number>(0)
-
-  const DOCK_HANDLE_HEIGHT_PX = 96
-  // const DOCK_VISIBLE_SLICE_RATIO = 0.25 - valor ideal para ideal inicial
-  const DOCK_VISIBLE_SLICE_RATIO = 0.35
-  // const DOCK_VISIBLE_SLICE_MIN_PX = 14
-  const DOCK_VISIBLE_SLICE_MIN_PX = 52
-  // const DOCK_BUBBLE_TEXT = 'Shorts'
-  const DOCK_BUBBLE_CONTENT = (
-    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
-      <path d="M2.5 3.5a.5.5 0 0 1 0-1h11a.5.5 0 0 1 0 1zm2-2a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1zM0 13a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 16 13V6a1.5 1.5 0 0 0-1.5-1.5h-13A1.5 1.5 0 0 0 0 6zm6.258-6.437a.5.5 0 0 1 .507.013l4 2.5a.5.5 0 0 1 0 .848l-4 2.5A.5.5 0 0 1 6 12V7a.5.5 0 0 1 .258-.437" />
-    </svg>
-  )
+  /** Mobile: vídeo em modo tela cheia (viewport), após toque na bolinha da doca. */
+  const [isMobileExpanded, setIsMobileExpanded] = useState(false)
 
   // Posição do card (fixo com scroll).
   const [pos, setPos] = useState<Pos>({ left: 16, top: 16 })
@@ -285,35 +242,13 @@ const YoutubeShortsWidget: any = ({
     })
   }, [])
 
-  const mobileControlsTimerRef = useRef<number | null>(null)
-  const showMobileControls = useCallback(() => {
-    setMobileControlsVisible(true)
-    if (mobileControlsTimerRef.current != null) {
-      window.clearTimeout(mobileControlsTimerRef.current)
-    }
-    mobileControlsTimerRef.current = window.setTimeout(() => {
-      setMobileControlsVisible(false)
-      mobileControlsTimerRef.current = null
-    }, 2500)
-  }, [])
-
-  const clearMobileControlsTimer = useCallback(() => {
-    if (mobileControlsTimerRef.current != null) {
-      window.clearTimeout(mobileControlsTimerRef.current)
-      mobileControlsTimerRef.current = null
-    }
-  }, [])
+  const showMobileControls = useCallback(() => {}, [])
 
   // Reset correto em SPA quando trocar de PDP (props mudam).
   useEffect(() => {
     setIsClosed(false)
     setIsPlaying(false)
-    setIsVideoPlaying(false)
-    setPlayerReady(false)
-    setProgress({ currentTime: 0, duration: 0 })
-    setVideoMeta({ title: '', author: '' })
-    setMobileControlsVisible(false)
-    clearMobileControlsTimer()
+    setIsMobileExpanded(false)
   }, [shortsUrl, startOnLoad])
 
   // Recarrega quando a página do SPA trocar (mesmo que `shortsUrl` não mude).
@@ -330,12 +265,7 @@ const YoutubeShortsWidget: any = ({
       setSpaKey((k) => k + 1)
       setIsClosed(false)
       setIsPlaying(false)
-      setIsVideoPlaying(false)
-      setPlayerReady(false)
-      setProgress({ currentTime: 0, duration: 0 })
-      setVideoMeta({ title: '', author: '' })
-      setMobileControlsVisible(false)
-      clearMobileControlsTimer()
+      setIsMobileExpanded(false)
     }
 
     const onPopState = () => resetForRouteChange()
@@ -363,7 +293,29 @@ const YoutubeShortsWidget: any = ({
       history.pushState = originalPushState
       history.replaceState = originalReplaceState
     }
-  }, [clearMobileControlsTimer])
+  }, [])
+
+  const dockOffsetX = isMobile ? mobileOffsetX : desktopOffsetX
+
+  const {
+    isDocked,
+    isDockHovering,
+    isDockedRef,
+    dockPos,
+    dockPosRef,
+    dockHoverIgnoreUntilRef,
+    cancelDockHide,
+    scheduleDockHide,
+    applyDockMode,
+    setIsDocked,
+    setIsDockHovering,
+  } = useDock({
+    isDockMode,
+    isMobile,
+    dockOffsetX,
+    size,
+    pos,
+  })
 
   const applyInitialPosition = useCallback(() => {
     if (!cardRef.current) return
@@ -380,14 +332,13 @@ const YoutubeShortsWidget: any = ({
       const left = window.innerWidth - width - offsetX
       const top = (window.innerHeight - height) / 2
       setPos({ left: clamp(left, 0, window.innerWidth - width), top: clamp(top, 0, window.innerHeight - height) })
-      setIsDocked(true)
-      setIsDockHovering(false)
+      applyDockMode(true)
     } else {
       setPos(getInitialPosFromAnchor(anchor, offsetX, offsetY, width, height))
-      setIsDocked(false)
-      setIsDockHovering(false)
+      applyDockMode(false)
     }
   }, [
+    applyDockMode,
     desktopAnchor,
     desktopOffsetX,
     desktopOffsetY,
@@ -439,56 +390,21 @@ const YoutubeShortsWidget: any = ({
     setSize({ width: safeWidth, height: nextHeight })
   }, [isMobile])
 
-  const dockAnchor: Anchor = isMobile ? mobileAnchor : desktopAnchor
-  const dockOffsetX = isMobile ? mobileOffsetX : desktopOffsetX
-
-  // Dock position: lado direito (com offsetX) e centralizado verticalmente.
-  const dockPos = useMemo(() => {
-    if (typeof window === 'undefined') return { left: pos.left, top: pos.top }
-    const rightEdgeX = window.innerWidth - dockOffsetX
-    const left = clamp(rightEdgeX - size.width, 0, window.innerWidth - size.width)
-    const top = (window.innerHeight - size.height) / 2
-    const clampedTop = clamp(top, 0, window.innerHeight - size.height)
-
-    return { left, top: clampedTop }
-  }, [dockAnchor, dockOffsetX, size.width, size.height, pos.left, pos.top])
-
-  // Sync de refs (evita stale closure).
-  isDockedRef.current = isDocked
-  dockPosRef.current = dockPos
-
   // A dock “fecha” o card quando estiver acoplado.
   // - mobile: esconde tudo (mantém apenas a bolinha cinza)
   // - desktop: mostra só um sliver até passar o mouse na alça
   const dockCardHiddenForUI =
     isDockMode && isDocked && (isMobile ? true : !isDockHovering)
 
-  const cancelDockHide = useCallback(() => {
-    if (dockHideTimerRef.current == null) return
-    window.clearTimeout(dockHideTimerRef.current)
-    dockHideTimerRef.current = null
-  }, [])
-
-  const scheduleDockHide = useCallback(() => {
-    if (!isDockMode) return
-    cancelDockHide()
-    dockHoverIgnoreUntilRef.current = performance.now() + 200
-    dockHideTimerRef.current = window.setTimeout(() => {
-      // Se não estiver mais acoplado, não faz sentido esconder.
-      if (!isDockedRef.current) return
-      setIsDockHovering(false)
-      dockHideTimerRef.current = null
-    }, 120)
-  }, [cancelDockHide, isDockMode])
-
   // Observação: não reposicionamos o widget para o dock quando ele esconde.
   // Assim, após arrastar e soltar, “tirar o mouse” não força snap de volta.
 
-  const dockHandleHeight = Math.max(44, Math.min(DOCK_HANDLE_HEIGHT_PX, size.height))
-  const handlePos = dockPos
-  // Bubble centralizada verticalmente no “lado direito” do widget.
-  const dockHandleTop = handlePos.top + (size.height - dockHandleHeight) / 2
-  const dockHandleLeft = handlePos.left + (size.width - dockHandleHeight)
+  // Bolinha mobile: encostada na borda direita do card (doca), centralizada na vertical.
+  const mobileDockBubbleSize = Math.max(44, Math.min(MOBILE_DOCK_BUBBLE_SIZE_PX, size.height))
+  const mobileDockBubbleLeft =
+    dockPos.left + (size.width - mobileDockBubbleSize) + MOBILE_DOCK_BUBBLE_OFFSET_X_PX
+  const mobileDockBubbleTop =
+    dockPos.top + (size.height - mobileDockBubbleSize) / 2 + MOBILE_DOCK_BUBBLE_OFFSET_Y_PX
 
   const shouldMountIframe = !!videoId && !isClosed && (startOnLoad || isPlaying)
   const autoplay = startOnLoad || isPlaying
@@ -496,568 +412,138 @@ const YoutubeShortsWidget: any = ({
   const embedUrl = useMemo(() => {
     if (!videoId) return null
     const origin = typeof window !== 'undefined' ? window.location.origin : undefined
-    return buildYoutubeEmbedUrl(videoId, { muted: false, autoplay, looping, origin })
-  }, [videoId, autoplay, looping])
+    return buildYoutubeEmbedUrl(videoId, {
+      muted: false,
+      autoplay,
+      looping,
+      origin,
+      youtubeControls: isMobile,
+    })
+  }, [videoId, autoplay, looping, isMobile])
 
   const onClose = useCallback(() => {
     setIsClosed(true)
     setIsPlaying(false)
-    setIsVideoPlaying(false)
-    setPlayerReady(false)
-    setProgress({ currentTime: 0, duration: 0 })
-
-    try {
-      playerRef.current?.stopVideo?.()
-      playerRef.current?.destroy?.()
-    } catch {
-      // noop
-    }
-    playerRef.current = null
   }, [])
 
   const onPlay = useCallback(() => {
     setIsPlaying(true)
-    if (isMobile) showMobileControls()
-  }, [isMobile, showMobileControls])
-
-  type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
-
-  const EDGE_THRESHOLD_PX = 10
-  const CORNER_THRESHOLD_PX = 14
-
-  const getResizeEdgeFromPoint = useCallback(
-    (x: number, y: number, rect: DOMRect): ResizeEdge | null => {
-      const leftDist = x - rect.left
-      const rightDist = rect.right - x
-      const topDist = y - rect.top
-      const bottomDist = rect.bottom - y
-
-      const nearLeft = leftDist <= EDGE_THRESHOLD_PX
-      const nearRight = rightDist <= EDGE_THRESHOLD_PX
-      const nearTop = topDist <= EDGE_THRESHOLD_PX
-      const nearBottom = bottomDist <= EDGE_THRESHOLD_PX
-
-      const nearCornerTop = topDist <= CORNER_THRESHOLD_PX
-      const nearCornerBottom = bottomDist <= CORNER_THRESHOLD_PX
-      const nearCornerLeft = leftDist <= CORNER_THRESHOLD_PX
-      const nearCornerRight = rightDist <= CORNER_THRESHOLD_PX
-
-      if (nearCornerLeft && nearCornerTop && nearLeft && nearTop) return 'nw'
-      if (nearCornerRight && nearCornerTop && nearRight && nearTop) return 'ne'
-      if (nearCornerLeft && nearCornerBottom && nearLeft && nearBottom) return 'sw'
-      if (nearCornerRight && nearCornerBottom && nearRight && nearBottom) return 'se'
-
-      if (nearTop) return 'n'
-      if (nearBottom) return 's'
-      if (nearLeft) return 'w'
-      if (nearRight) return 'e'
-
-      return null
-    },
-    [],
-  )
-
-  const getCursorForEdge = useCallback((edge: ResizeEdge): string => {
-    switch (edge) {
-      case 'n':
-      case 's':
-        return 'ns-resize'
-      case 'e':
-      case 'w':
-        return 'ew-resize'
-      case 'nw':
-      case 'se':
-        return 'nwse-resize'
-      case 'ne':
-      case 'sw':
-        return 'nesw-resize'
-      default:
-        return 'grab'
-    }
   }, [])
 
-  // Drag do widget: qualquer parte (exceto elementos interativos).
-  const dragRef = useRef<{
-    pointerId: number
-    startClientX: number
-    startClientY: number
-    startLeft: number
-    startTop: number
-    width: number
-    height: number
-  } | null>(null)
-  const pressRef = useRef<{
-    pointerId: number
-    startClientX: number
-    startClientY: number
-    startLeft: number
-    startTop: number
-    width: number
-    height: number
-    startedAtMs: number
-  } | null>(null)
+  const {
+    playerReady,
+    isVideoPlaying,
+    progress,
+    volume,
+    togglePlayPause,
+    onSeekFromPercent,
+    onVolumeChange,
+    pauseVideo,
+    playVideo,
+  } = useYouTubePlayer({
+    shouldMountIframe,
+    iframeRef: iframeRef as React.RefObject<HTMLIFrameElement>,
+    videoId,
+    spaKey,
+    looping,
+    initialVolume: DEFAULT_INITIAL_VOLUME,
+    startOnLoad,
+    isPlaying,
+    isHovering,
+    isMobile,
+    showMobileControls,
+  })
 
-  // Resize do widget (mantendo proporção 9:16).
-  const resizeRef = useRef<{
-    pointerId: number
-    edge: ResizeEdge
-    startClientX: number
-    startClientY: number
-    startLeft: number
-    startTop: number
-    startWidth: number
-    startHeight: number
-  } | null>(null)
+  const appliedLoadVolumeRef = useRef(false)
 
-  const onPointerDownCard = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!cardRef.current) return
-      if (e.button !== 0) return
-
-      // const t = e.target instanceof HTMLElement ? e.target : null
-      const target = e.target as Element | null
-
-      // Não inicia drag em botões/inputs/elementos explicitamente marcados.
-      // if (t?.closest('button, input, select, textarea, [data-no-drag="true"]')) return
-      if (target?.closest('button, input, select, textarea, [data-no-drag="true"]')) return
-
-      const rect = cardRef.current.getBoundingClientRect()
-      const width = rect.width || size.width
-      const height = rect.height || size.height
-
-      const edge = isMobile ? null : getResizeEdgeFromPoint(e.clientX, e.clientY, rect)
-      if (edge) {
-        resizeRef.current = {
-          pointerId: e.pointerId,
-          edge,
-          startClientX: e.clientX,
-          startClientY: e.clientY,
-          startLeft: posRef.current.left,
-          startTop: posRef.current.top,
-          startWidth: width,
-          startHeight: height,
-        }
-
-        try {
-          e.currentTarget.setPointerCapture(e.pointerId)
-        } catch {
-          // noop
-        }
-        e.preventDefault()
-        return
-      }
-
-      dragRef.current = {
-        pointerId: e.pointerId,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startLeft: posRef.current.left,
-        startTop: posRef.current.top,
-        width,
-        height,
-      }
-      pressRef.current = {
-        pointerId: e.pointerId,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startLeft: posRef.current.left,
-        startTop: posRef.current.top,
-        width,
-        height,
-        startedAtMs: performance.now(),
-      }
-
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId)
-      } catch {
-        // noop
-      }
-      e.preventDefault()
-    },
-    [getResizeEdgeFromPoint, isMobile, size.width, size.height],
-  )
-
-  const onPointerMoveCard = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (resizeRef.current) {
-        if (e.pointerId !== resizeRef.current.pointerId) return
-
-        const r = resizeRef.current
-        const dx = e.clientX - r.startClientX
-        const dy = e.clientY - r.startClientY
-
-        const includesN = r.edge === 'n' || r.edge === 'ne' || r.edge === 'nw'
-        const includesS = r.edge === 's' || r.edge === 'se' || r.edge === 'sw'
-
-        let nextWidth = r.startWidth
-        let nextHeight = r.startHeight
-        let nextLeft = r.startLeft
-        let nextTop = r.startTop
-
-        const minHeight = Math.round((MIN_WIDTH * 16) / 9)
-        const maxHeight = Math.round((MAX_WIDTH * 16) / 9)
-
-        // Horizontal resizing has priority when edge includes left/right.
-        if (
-          r.edge === 'e' ||
-          r.edge === 'w' ||
-          r.edge === 'ne' ||
-          r.edge === 'nw' ||
-          r.edge === 'se' ||
-          r.edge === 'sw'
-        ) {
-          if (r.edge === 'e' || r.edge === 'ne' || r.edge === 'se') {
-            nextWidth = r.startWidth + dx
-            const maxW = Math.min(MAX_WIDTH, window.innerWidth - r.startLeft)
-            nextWidth = clamp(nextWidth, MIN_WIDTH, maxW)
-          } else {
-            // 'w' / 'nw' / 'sw'
-            const fixedRight = r.startLeft + r.startWidth
-            nextWidth = r.startWidth - dx
-            const maxW = Math.min(MAX_WIDTH, fixedRight)
-            nextWidth = clamp(nextWidth, MIN_WIDTH, maxW)
-            nextLeft = fixedRight - nextWidth
-          }
-
-          nextHeight = Math.round((nextWidth * 16) / 9)
-
-          if (includesN) {
-            const fixedBottom = r.startTop + r.startHeight
-            nextTop = fixedBottom - nextHeight
-          } else if (includesS) {
-            nextTop = r.startTop
-          } else {
-            nextTop = r.startTop
-          }
-        } else {
-          // Vertical resize only
-          if (r.edge === 's') {
-            nextHeight = r.startHeight + dy
-            const maxH = Math.min(window.innerHeight - r.startTop, maxHeight)
-            nextHeight = clamp(nextHeight, minHeight, maxH)
-            nextTop = r.startTop
-          } else {
-            // 'n'
-            const fixedBottom = r.startTop + r.startHeight
-            nextHeight = r.startHeight - dy
-            const maxH = Math.min(fixedBottom, maxHeight)
-            nextHeight = clamp(nextHeight, minHeight, maxH)
-            nextTop = fixedBottom - nextHeight
-          }
-
-          nextWidth = Math.round(nextHeight * ASPECT_RATIO_W_H)
-          nextHeight = Math.round((nextWidth * 16) / 9)
-        }
-
-        // Clamps finais dentro da viewport
-        nextWidth = Math.round(nextWidth)
-        nextHeight = Math.round(nextHeight)
-        nextLeft = clamp(nextLeft, 0, window.innerWidth - nextWidth)
-        nextTop = clamp(nextTop, 0, window.innerHeight - nextHeight)
-
-        setSize({ width: nextWidth, height: nextHeight })
-        setPosThrottled({ left: nextLeft, top: nextTop })
-        return
-      }
-
-      if (dragRef.current) {
-        if (e.pointerId !== dragRef.current.pointerId) return
-
-        const d = dragRef.current
-        const dx = e.clientX - d.startClientX
-        const dy = e.clientY - d.startClientY
-        const press = pressRef.current
-
-        if (press && press.pointerId === e.pointerId) {
-          const elapsedMs = performance.now() - press.startedAtMs
-          if (elapsedMs < LONG_PRESS_MS) return
-        }
-
-        const nextLeft = clamp(d.startLeft + dx, 0, window.innerWidth - d.width)
-        const nextTop = clamp(d.startTop + dy, 0, window.innerHeight - d.height)
-
-        setPosThrottled({ left: nextLeft, top: nextTop })
-        return
-      }
-
-      // Atualiza cursor nas bordas/cantos quando não está arrastando/redimensionando.
-      if (isMobile) return
-      if (!cardRef.current) return
-      const rect = cardRef.current.getBoundingClientRect()
-      const edge = getResizeEdgeFromPoint(e.clientX, e.clientY, rect)
-      const cursor = edge ? getCursorForEdge(edge) : null
-
-      if (cursor !== lastResizeCursorRef.current) {
-        lastResizeCursorRef.current = cursor
-        setResizeCursor(cursor)
-      }
-    },
-    [getCursorForEdge, getResizeEdgeFromPoint, isMobile, setPosThrottled],
-  )
-
-  const onPointerUpCard = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (resizeRef.current && e.pointerId === resizeRef.current.pointerId) {
-        resizeRef.current = null
-        e.preventDefault()
-        return
-      }
-
-      if (!dragRef.current) return
-      if (e.pointerId !== dragRef.current.pointerId) return
-
-      const d = dragRef.current
-      const press = pressRef.current
-      dragRef.current = null
-      pressRef.current = null
-
-      if (!press || press.pointerId !== e.pointerId) {
-        e.preventDefault()
-        return
-      }
-
-      const elapsedMs = performance.now() - press.startedAtMs
-      const movedX = Math.abs(e.clientX - d.startClientX)
-      const movedY = Math.abs(e.clientY - d.startClientY)
-      const moved = Math.max(movedX, movedY)
-      const isTap = elapsedMs < LONG_PRESS_MS && moved <= TAP_MOVE_TOLERANCE_PX
-
-      if (isTap) {
-        const p = playerRef.current
-        if (p) {
-          try {
-            if (isVideoPlaying) p.pauseVideo?.()
-            else p.playVideo?.()
-          } catch {
-            // noop
-          }
-        }
-      }
-
-      // Dock snap: soltar arrastando perto do dock => fica “acoplado”.
-      if (!isTap && isDockMode) {
-        const current = posRef.current
-        const dock = dockPosRef.current
-
-        // A doca considera “todo o espaço do canto direito” com tolerancia de 10%
-        // do espaço disponível entre o meio da tela e o lado direito.
-        const currentRightEdge = current.left + size.width
-        const dockRightEdge = dock.left + size.width
-        const regionLeftX = window.innerWidth / 2
-        const regionWidth = Math.max(0, dockRightEdge - regionLeftX)
-        const dockRightEdgeMin = dockRightEdge - regionWidth * 0.1
-        const shouldDock = currentRightEdge >= dockRightEdgeMin
-
-        if (shouldDock) {
-          setIsDocked(true)
-          setIsDockHovering(false)
-          setPos(dock)
-        } else if (isDockedRef.current) {
-          setIsDocked(false)
-          setIsDockHovering(false)
-        }
-      }
-
-      e.preventDefault()
-    },
-    [isDockMode, isVideoPlaying, size.width],
-  )
-
-  // Mantém o widget dentro dos limites da janela ao redimensionar.
   useEffect(() => {
-    setPos((p) => ({
-      left: clamp(p.left, 0, window.innerWidth - size.width),
-      top: clamp(p.top, 0, window.innerHeight - size.height),
-    }))
-  }, [size.width, size.height])
-
-  // Inicializa o player do YouTube via IFrame API.
-  useEffect(() => {
-    if (!shouldMountIframe) return
-    if (!iframeRef.current) return
-
-    let cancelled = false
-    const iframe = iframeRef.current
-
-    loadYouTubeIframeAPI().then(() => {
-      if (cancelled) return
-      if (!iframeRef.current) return
-      if (!window.YT?.Player) return
-
-      try {
-        playerRef.current?.destroy?.()
-      } catch {
-        // noop
-      }
-
-      const player = new window.YT.Player(iframe, {
-        events: {
-          onReady: () => {
-            if (cancelled) return
-            setPlayerReady(true)
-            try {
-              const data = player.getVideoData?.()
-              setVideoMeta({
-                title: data?.title || '',
-                author: data?.author || '',
-              })
-            } catch {
-              setVideoMeta({ title: '', author: '' })
-            }
-
-            try {
-              // Regra única de áudio:
-              // se a página carregar com o vídeo acoplado na doca, inicia com volume visual 0.
-              const shouldStartWithVolumeZero = isDockModeViewport() && isDockedRef.current
-              if (shouldStartWithVolumeZero) {
-                player.setVolume?.(0)
-                setVolume(0)
-              }
-            } catch {
-              // noop
-            }
-
-            try {
-              const v = player.getVolume?.()
-              if (typeof v === 'number' && !Number.isNaN(v)) setVolume(v)
-            } catch {
-              // noop
-            }
-
-            try {
-              if (startOnLoad || isPlaying) player.playVideo?.()
-            } catch {
-              // noop
-            }
-          },
-          onStateChange: (evt: any) => {
-            const state = evt?.data
-            setIsVideoPlaying(state === 1)
-
-            // Reforço de loop: em alguns cenários o embed pode não repetir sozinho.
-            if (state === window.YT?.PlayerState?.ENDED && looping) {
-              try {
-                player.seekTo?.(0, true)
-                player.playVideo?.()
-              } catch {
-                // noop
-              }
-            }
-          },
-        },
-      })
-
-      playerRef.current = player
-    })
-
-    return () => {
-      cancelled = true
-      setPlayerReady(false)
-      setIsVideoPlaying(false)
-
-      try {
-        playerRef.current?.destroy?.()
-      } catch {
-        // noop
-      }
-      playerRef.current = null
-    }
-    // Dependências: recria quando o iframe é forçado por `spaKey`/troca de vídeo.
-  }, [shouldMountIframe, videoId, spaKey, looping])
-
-  // Atualiza progresso/volume enquanto o usuário está no hover.
-  useEffect(() => {
-    if (!playerReady) return
-    if (!isHovering) return
-    if (!shouldMountIframe) return
-
-    const timer = window.setInterval(() => {
-      const p = playerRef.current
-      if (!p) return
-
-      try {
-        const duration = p.getDuration?.()
-        const currentTime = p.getCurrentTime?.()
-        if (typeof duration === 'number' && typeof currentTime === 'number') {
-          setProgress({
-            currentTime: Number.isFinite(currentTime) ? currentTime : 0,
-            duration: Number.isFinite(duration) ? duration : 0,
-          })
-        }
-      } catch {
-        // noop
-      }
-
-      try {
-        const v = p.getVolume?.()
-        if (typeof v === 'number' && !Number.isNaN(v)) setVolume(v)
-      } catch {
-        // noop
-      }
-    }, 250)
-
-    return () => window.clearInterval(timer)
-  }, [isHovering, playerReady, shouldMountIframe])
-
-  const togglePlayPause = useCallback(() => {
-    const p = playerRef.current
-    if (!p) return
-
-    if (isMobile) showMobileControls()
-
-    try {
-      if (isVideoPlaying) p.pauseVideo?.()
-      else p.playVideo?.()
-    } catch {
-      // noop
-    }
-  }, [isMobile, isVideoPlaying, showMobileControls])
-
-  const onSeekFromPercent = useCallback(
-    (percent: number) => {
-      const p = playerRef.current
-      if (!p) return
-      if (!progress.duration) return
-
-      if (isMobile) showMobileControls()
-
-      const seconds = (clamp(percent, 0, 100) / 100) * progress.duration
-      try {
-        p.seekTo?.(seconds, true)
-      } catch {
-        // noop
-      }
-    },
-    [isMobile, progress.duration, showMobileControls],
-  )
-
-  const onVolumeChange = useCallback((nextVolume: number) => {
-    setVolume(nextVolume)
-    if (isMobile) showMobileControls()
-    const p = playerRef.current
-    if (!p) return
-    try {
-      p.setVolume?.(nextVolume)
-    } catch {
-      // noop
-    }
-  }, [isMobile, showMobileControls])
-
-  const onToggleFullscreen = useCallback(() => {
-    if (!isMobile) return
-    showMobileControls()
-    const iframe = iframeRef.current
-    if (!iframe) return
-    const doc: any = document
-    if (doc.fullscreenElement) {
-      doc.exitFullscreen?.()
-      doc.webkitExitFullscreen?.()
+    if (!shouldMountIframe) {
+      appliedLoadVolumeRef.current = false
       return
     }
-    const el: any = iframe
-    el.requestFullscreen?.()
-    el.webkitRequestFullscreen?.()
-  }, [isMobile, showMobileControls])
+    if (!playerReady) return
+    if (appliedLoadVolumeRef.current) return
+
+    const loadVolume = isDockMode && isDocked ? 0 : DEFAULT_INITIAL_VOLUME
+    onVolumeChange(loadVolume)
+    appliedLoadVolumeRef.current = true
+  }, [isDockMode, isDocked, onVolumeChange, playerReady, shouldMountIframe])
+
+  const {
+    resizeCursor,
+    onPointerDownCard,
+    onPointerMoveCard,
+    onPointerUpCard,
+  } = useDragResize({
+    cardRef,
+    posRef,
+    setPosThrottled,
+    size,
+    setSize,
+    isMobile,
+    isDockMode,
+    isVideoPlaying,
+    dockPosRef,
+    isDockedRef,
+    setIsDocked,
+    setIsDockHovering,
+    setPos,
+    onTapToggle: isMobile ? undefined : togglePlayPause,
+  })
+
+  const exitMobileExpandedToDocked = useCallback(() => {
+    const doc = document as any
+    try {
+      doc.exitFullscreen?.()
+      doc.webkitExitFullscreen?.()
+    } catch {
+      // noop
+    }
+    setIsMobileExpanded(false)
+    setIsDocked(true)
+    pauseVideo()
+  }, [pauseVideo, setIsDocked])
+
+  useLayoutEffect(() => {
+    if (!isMobile || !isMobileExpanded) return
+    const el = mobileFullscreenShellRef.current as any
+    if (!el) return
+    const doc = document as any
+    const tryEnter = () => {
+      try {
+        if (doc.fullscreenElement || doc.webkitFullscreenElement) return
+        el.requestFullscreen?.()
+        el.webkitRequestFullscreen?.()
+      } catch {
+        // noop
+      }
+    }
+    tryEnter()
+    requestAnimationFrame(tryEnter)
+  }, [isMobile, isMobileExpanded])
+
+  useEffect(() => {
+    if (isMobile && isDocked) setIsMobileExpanded(false)
+  }, [isMobile, isDocked])
+
+  useEffect(() => {
+    if (!isMobile || !isDockMode || !isDocked || !playerReady) return
+    pauseVideo()
+  }, [isMobile, isDockMode, isDocked, playerReady, pauseVideo])
+
+  useEffect(() => {
+    if (!isMobile || !isMobileExpanded) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [isMobile, isMobileExpanded])
+
+  useEffect(() => {
+    if (!isMobile || !isMobileExpanded || !playerReady) return
+    playVideo()
+  }, [isMobile, isMobileExpanded, playerReady, playVideo])
 
   const progressPercent = progress.duration
     ? clamp(progress.currentTime / progress.duration, 0, 1) * 100
@@ -1073,17 +559,26 @@ const YoutubeShortsWidget: any = ({
     : 0
 
   // Quando a doca está “fechada”, evita mostrar overlays (header/controls).
+  // No mobile os controles são nativos do YouTube (`controls=1` no embed).
   const shouldShowControls =
     shouldMountIframe &&
     !dockCardHiddenForUI &&
-    (isMobile ? mobileControlsVisible : isHovering || !isVideoPlaying)
-  const shouldShowHeader = shouldMountIframe && !dockCardHiddenForUI && (isMobile ? mobileControlsVisible : isHovering)
+    !isMobile &&
+    (isHovering || !isVideoPlaying)
 
   if (!videoId) return null
   if (isClosed) return null
 
   return (
     <>
+      <style>{`
+        .ytw-btn-close { color: #fff; }
+        .ytw-btn-play { color: #fff; }
+        .ytw-btn-volume { color: #fff; }
+        .ytw-btn-close:hover { color: #f90041; }
+        .ytw-btn-play:not(:disabled):hover { color: #FFDA00; }
+        .ytw-btn-volume:not(:disabled):hover { color: #FFDA00; }
+      `}</style>
       {/* Desktop: alça transparente para revelar o widget quando estiver acoplado */}
       {isDockMode && !isMobile && isDocked ? (
         <div
@@ -1111,25 +606,25 @@ const YoutubeShortsWidget: any = ({
         />
       ) : null}
 
-      {/* Dock: mobile mostra bolinha cinza (e pode ter texto). Acima de 1024 revela sliver. */}
+      {/* Dock: mobile mostra bolinha cinza. Acima de 1024 revela sliver (desktop). */}
       {isDockMode && isMobile && isDocked ? (
         <div
           data-no-drag="true"
           role="button"
-          aria-label="Abrir Shorts"
+          aria-label="Abrir em tela cheia"
           onClick={() => {
             setIsDocked(false)
-            showMobileControls()
+            setIsMobileExpanded(true)
           }}
           style={{
             position: 'fixed',
-            left: dockHandleLeft,
-            top: dockHandleTop,
-            width: dockHandleHeight,
-            height: dockHandleHeight,
+            left: mobileDockBubbleLeft,
+            top: mobileDockBubbleTop,
+            width: mobileDockBubbleSize,
+            height: mobileDockBubbleSize,
             zIndex: 10000,
             pointerEvents: 'auto',
-            background: 'rgba(0,0,0,0.35)',
+            background: MOBILE_DOCK_BUBBLE_BACKGROUND,
             borderRadius: 999,
             boxShadow: '0 0 0 1px rgba(255,255,255,0.08) inset',
             cursor: 'pointer',
@@ -1145,16 +640,15 @@ const YoutubeShortsWidget: any = ({
             data-no-drag="true"
             style={{
               color: '#fff',
-              fontSize: 12,
               fontWeight: 800,
-              lineHeight: '14px',
+              lineHeight: 1,
               opacity: 0.95,
               textShadow: '0 1px 2px rgba(0,0,0,0.45)',
               userSelect: 'none',
               whiteSpace: 'nowrap',
             }}
           >
-            {DOCK_BUBBLE_CONTENT}
+            <DockBubbleIcon sizePx={MOBILE_DOCK_BUBBLE_ICON_SIZE_PX} />
           </div>
         </div>
       ) : null}
@@ -1172,9 +666,17 @@ const YoutubeShortsWidget: any = ({
           background: 'transparent',
           touchAction: 'none',
           cursor: isMobile ? 'grab' : resizeCursor || 'grab',
-          transform: `translateX(${dockHiddenTranslateXPx}px)`,
+          transform:
+            dockHiddenTranslateXPx > 0
+              ? `translateX(${dockHiddenTranslateXPx}px)`
+              : 'none',
           opacity: dockCardHiddenMobile ? 0 : 1,
-          pointerEvents: dockCardHiddenMobile || dockCardHiddenDesktop ? 'none' : 'auto',
+          pointerEvents:
+            dockCardHiddenMobile || dockCardHiddenDesktop
+              ? 'none'
+              : isMobile && isMobileExpanded
+                ? 'none'
+                : 'auto',
           transition: 'transform .2s ease-in-out, opacity .2s ease-in-out',
         }}
         aria-label="YouTube Shorts widget"
@@ -1190,27 +692,21 @@ const YoutubeShortsWidget: any = ({
         onMouseLeave={() => {
           setIsHovering(false)
           setIsVolumeHovering(false)
-          setResizeCursor(null)
-          lastResizeCursorRef.current = null
 
           if (isDockMode && isDockedRef.current) scheduleDockHide()
         }}
         onPointerDown={onPointerDownCard}
         onPointerMove={onPointerMoveCard}
         onPointerUp={onPointerUpCard}
-        onClick={() => {
-          if (!isMobile || !shouldMountIframe) return
-          showMobileControls()
-        }}
       >
-        {closable ? (
+        {closable && !(isMobile && isMobileExpanded) ? (
           <button
             type="button"
             data-no-drag="true"
+            className="ytw-btn-close"
             onClick={onClose}
-            onMouseEnter={() => setIsCloseBtnHovering(true)}
-            onMouseLeave={() => setIsCloseBtnHovering(false)}
             aria-label="Fechar"
+            title="Fechar"
             style={{
               position: 'absolute',
               // left: -12,
@@ -1226,7 +722,7 @@ const YoutubeShortsWidget: any = ({
               // background: 'rgba(0,0,0,0.6)',
               // background: 'unset',
               background: '#1614133d',
-              color: isCloseBtnHovering ? '#f90041' : '#fff',
+              // color: '#fff',
               cursor: 'pointer',
               padding: 0,
               transition: 'color .3s ease-in-out',
@@ -1242,15 +738,66 @@ const YoutubeShortsWidget: any = ({
         ) : null}
 
         <div
+          ref={mobileFullscreenShellRef}
           style={{
             width: '100%',
             height: '100%',
-            borderRadius: 12,
+            borderRadius: isMobile && isMobileExpanded ? 0 : 12,
             overflow: 'hidden',
-            position: 'relative',
+            position: isMobile && isMobileExpanded ? 'fixed' : 'relative',
             background: '#000',
+            ...(isMobile && isMobileExpanded
+              ? {
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  width: '100vw',
+                  height: '100dvh',
+                  zIndex: MOBILE_EXPAND_Z,
+                  boxSizing: 'border-box' as const,
+                }
+              : {}),
           }}
         >
+          {isMobile && isMobileExpanded ? (
+            <button
+              type="button"
+              data-no-drag="true"
+              onClick={exitMobileExpandedToDocked}
+              aria-label="Sair da tela cheia e ocultar"
+              title="Fechar"
+              style={{
+                position: 'absolute',
+                top: 'max(10px, env(safe-area-inset-top, 0px))',
+                right: 'max(10px, env(safe-area-inset-right, 0px))',
+                zIndex: MOBILE_EXPAND_CLOSE_Z,
+                width: 44,
+                height: 44,
+                borderRadius: 999,
+                border: 'none',
+                background: 'rgba(0,0,0,0.55)',
+                color: '#fff',
+                cursor: 'pointer',
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 2px 12px rgba(0,0,0,0.35)',
+              }}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="28"
+                height="28"
+                fill="currentColor"
+                viewBox="0 0 16 16"
+                style={{ pointerEvents: 'none' }}
+              >
+                <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8z" />
+              </svg>
+            </button>
+          ) : null}
           {shouldMountIframe && embedUrl ? (
             <iframe
               key={`${videoId}-${spaKey}`}
@@ -1296,8 +843,8 @@ const YoutubeShortsWidget: any = ({
             </button>
           )}
 
-          {/* Controles no hover (progresso + play/pause + volume) */}
-          {shouldMountIframe ? (
+          {/* Desktop: camada que captura hover; no mobile o toque vai ao iframe (controles nativos). */}
+          {shouldMountIframe && !isMobile ? (
             <div
               aria-hidden="true"
               style={{
@@ -1309,33 +856,7 @@ const YoutubeShortsWidget: any = ({
             />
           ) : null}
 
-          {shouldMountIframe ? (
-            <div
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                zIndex: 2,
-                padding: '10px 10px 14px',
-                background: 'linear-gradient(180deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 100%)',
-                opacity: shouldShowHeader ? 1 : 0,
-                transition: 'opacity .3s ease-in-out',
-                pointerEvents: 'none',
-              }}
-            >
-              <div style={{ color: '#fff', fontSize: 13, fontWeight: 700, lineHeight: '18px' }}>
-                {videoMeta.title || 'YouTube Shorts'}
-              </div>
-              {videoMeta.author ? (
-                <div style={{ color: 'rgba(255,255,255,0.86)', fontSize: 12, lineHeight: '16px' }}>
-                  {videoMeta.author}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {shouldMountIframe ? (
+          {shouldMountIframe && !isMobile ? (
             <div
               style={{
                 position: 'absolute',
@@ -1362,9 +883,8 @@ const YoutubeShortsWidget: any = ({
                   <button
                     type="button"
                     data-no-drag="true"
+                    className="ytw-btn-play"
                     onClick={togglePlayPause}
-                    onMouseEnter={() => setIsPlayPauseBtnHovering(true)}
-                    onMouseLeave={() => setIsPlayPauseBtnHovering(false)}
                     disabled={!playerReady}
                     aria-label={isVideoPlaying ? 'Pause' : 'Play'}
                     style={{
@@ -1375,19 +895,22 @@ const YoutubeShortsWidget: any = ({
                       borderRadius: 999,
                       border: '1px solid rgba(255,255,255,0.25)',
                       background: 'rgba(0,0,0,0.55)',
-                      color: isPlayPauseBtnHovering && playerReady ? '#f90041' : '#fff',
+                      // color: '#fff',
                       cursor: playerReady ? 'pointer' : 'not-allowed',
                       fontWeight: 800,
-                      fontSize: 16,
-                      lineHeight: '32px',
-                      transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
+                      // fontSize: 16,
+                      // lineHeight: '32px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      transition: 'all .3s ease-in-out',
                     }}
                   >
                     {/* {isVideoPlaying ? '||' : '>'} */}
                     {isVideoPlaying ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5" /></svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none', verticalAlign: 'middle' }}><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5" /></svg>
                     ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393" /></svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none', verticalAlign: 'middle' }}><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393" /></svg>
                     )}
                   </button>
 
@@ -1438,6 +961,7 @@ const YoutubeShortsWidget: any = ({
                         <input
                           data-no-drag="true"
                           type="range"
+                          className="ytw-range-volume"
                           min={0}
                           max={100}
                           step={1}
@@ -1459,13 +983,12 @@ const YoutubeShortsWidget: any = ({
                       <button
                         type="button"
                         data-no-drag="true"
+                        className="ytw-btn-volume"
                         onClick={() => {
                           if (!playerReady) return
                           const next = volume > 0 ? 0 : 50
                           onVolumeChange(next)
                         }}
-                        onMouseEnter={() => setIsVolumeBtnHovering(true)}
-                        onMouseLeave={() => setIsVolumeBtnHovering(false)}
                         disabled={!playerReady}
                         aria-label="Volume"
                         style={{
@@ -1474,20 +997,23 @@ const YoutubeShortsWidget: any = ({
                           borderRadius: 999,
                           border: 'none',
                           background: 'transparent',
-                          color: isVolumeBtnHovering && playerReady ? '#f90041' : '#fff',
+                          // color: '#fff',
                           cursor: playerReady ? 'pointer' : 'not-allowed',
                           fontWeight: 800,
                           fontSize: 14,
-                          lineHeight: '32px',
+                          // lineHeight: '32px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
                           flexShrink: 0,
-                          transition: 'color .3s ease-in-out',
+                          transition: 'all .3s ease-in-out',
                         }}
                       >
                         {/* {volume === 0 ? 'M' : 'V'} */}
                         {volume === 0 ? (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06m7.137 2.096a.5.5 0 0 1 0 .708L12.207 8l1.647 1.646a.5.5 0 0 1-.708.708L11.5 8.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 8 9.146 6.354a.5.5 0 1 1 .708-.708L11.5 7.293l1.646-1.647a.5.5 0 0 1 .708 0" /></svg>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none', verticalAlign: 'middle' }}><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06m7.137 2.096a.5.5 0 0 1 0 .708L12.207 8l1.647 1.646a.5.5 0 0 1-.708.708L11.5 8.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 8 9.146 6.354a.5.5 0 1 1 .708-.708L11.5 7.293l1.646-1.647a.5.5 0 0 1 .708 0" /></svg>
                         ) : (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none', verticalAlign: 'middle' }}>
                             <path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303z" />
                             <path d="M10.121 12.596A6.48 6.48 0 0 0 12.025 8a6.48 6.48 0 0 0-1.904-4.596l-.707.707A5.48 5.48 0 0 1 11.025 8a5.48 5.48 0 0 1-1.61 3.89z" />
                             <path d="M8.707 11.182A4.5 4.5 0 0 0 10.025 8a4.5 4.5 0 0 0-1.318-3.182L8 5.525A3.5 3.5 0 0 1 9.025 8 3.5 3.5 0 0 1 8 10.475zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06" />
@@ -1498,37 +1024,10 @@ const YoutubeShortsWidget: any = ({
                   </div>
 
                   {/* Barra de progresso (cor branca) */}
-                  {isMobile ? (
-                    <button
-                      type="button"
-                      data-no-drag="true"
-                      onClick={onToggleFullscreen}
-                      onMouseEnter={() => setIsFullscreenBtnHovering(true)}
-                      onMouseLeave={() => setIsFullscreenBtnHovering(false)}
-                      disabled={!playerReady}
-                      aria-label="Tela cheia"
-                      style={{
-                        pointerEvents: 'auto',
-                        width: 32,
-                        height: 32,
-                        flexShrink: 0,
-                        borderRadius: 999,
-                        border: '1px solid rgba(255,255,255,0.25)',
-                        background: 'rgba(0,0,0,0.55)',
-                        color: isFullscreenBtnHovering && playerReady ? '#f90041' : '#fff',
-                        cursor: playerReady ? 'pointer' : 'not-allowed',
-                        lineHeight: '32px',
-                        transition: 'color .3s ease-in-out, background .3s ease-in-out, border-color .3s ease-in-out',
-                      }}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16" style={{ pointerEvents: 'none' }}>
-                        <path d="M1 1h5v1H2v4H1zM10 1h5v5h-1V2h-4zM1 10h1v4h4v1H1zM14 10h1v5h-5v-1h4z" />
-                      </svg>
-                    </button>
-                  ) : null}
                   <input
                     data-no-drag="true"
                     type="range"
+                    className="ytw-range-progress"
                     min={0}
                     max={100}
                     step={0.1}
@@ -1540,23 +1039,11 @@ const YoutubeShortsWidget: any = ({
                     style={{
                       flex: 1,
                       accentColor: '#fff',
+                      width: '100%'
                     }}
                     aria-label="Progresso"
                   />
                 </div>
-                {isMobile ? (
-                  <div
-                    style={{
-                      marginTop: 8,
-                      display: 'flex',
-                      justifyContent: 'center',
-                      fontSize: 11,
-                      color: 'rgba(255,255,255,0.82)',
-                    }}
-                  >
-                    Toque no widget para exibir os controles
-                  </div>
-                ) : null}
               </div>
             </div>
           ) : null}
@@ -1611,7 +1098,7 @@ YoutubeShortsWidget.defaultProps = {
   // desktopOffsetX: 16,
   // desktopOffsetY: 16,
   desktopOffsetX: 32,
-  desktopOffsetY: 32,
+  desktopOffsetY: 108,
   mobileAnchor: 'bottom-right',
   mobileOffsetX: 12,
   mobileOffsetY: 12,

@@ -33,6 +33,7 @@ Current behavior (updated):
   - Dedicated control overlay with auto-hide on tap interactions.
   - Fullscreen button for video.
 - Hover visual effects use `transition: .3s ease-in-out` in interactive UI controls.
+- Action button hover color is handled via CSS `:hover` classes (instead of React hover state for button color).
 
 ![Media Placeholder](https://user-images.githubusercontent.com/52087100/71204177-42ca4f80-227e-11ea-89e6-e92e65370c69.png)
 
@@ -87,12 +88,12 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 | Prop name | Type | Description | Default value |
 | ---------- | ---- | ----------- | ------------- |
 | `shortsUrl` | `string` | YouTube URL (Shorts or `watch?v=<id>`). | `''` |
-| `startOnLoad` | `boolean` | If `true`, mounts the iframe and starts playback when the block loads. In docked mode, autoplay starts muted and follows dock hover mute/unmute behavior. | `true` |
+| `startOnLoad` | `boolean` | If `true`, mounts the iframe and starts playback when the block loads. | `true` |
 | `closable` | `boolean` | If `true`, shows the `×` close button and allows unmounting. | `true` |
 | `looping` | `boolean` | If `true`, the video restarts automatically when it ends (infinite loop). | `true` |
 | `desktopAnchor` | `top-left` \| `top-right` \| `bottom-left` \| `bottom-right` | Initial widget anchor in desktop view. | `'bottom-right'` |
-| `desktopOffsetX` | `number` | Horizontal offset in desktop view (px). | `16` |
-| `desktopOffsetY` | `number` | Vertical offset in desktop view (px). | `16` |
+| `desktopOffsetX` | `number` | Horizontal offset in desktop view (px). | `32` |
+| `desktopOffsetY` | `number` | Vertical offset in desktop view (px). | `32` |
 | `mobileAnchor` | `top-left` \| `top-right` \| `bottom-left` \| `bottom-right` | Initial widget anchor in mobile view (`<1024px`). | `'bottom-right'` |
 | `mobileOffsetX` | `number` | Horizontal offset in mobile view (px). | `12` |
 | `mobileOffsetY` | `number` | Vertical offset in mobile view (px). | `12` |
@@ -111,6 +112,7 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 - Position controls:
   - `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY` define initial position in desktop.
   - `mobileAnchor`, `mobileOffsetX`, `mobileOffsetY` define initial position in mobile.
+- Internally, dock state changes triggered by initial positioning are handled through the dock hook API (`applyDockMode`) to keep widget code decoupled from dock state internals.
 - Initial position props are intentionally hidden from Site Editor and should be configured only via code/props.
 - Mobile interaction:
   - Tap shows controls for a short period.
@@ -118,14 +120,18 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
   - Dragging is enabled; edge-based resize is disabled.
 - Audio on load:
   - There is no `muted` prop anymore.
-  - If the page loads with the widget already docked, autoplay starts muted.
-  - When hovering the revealed docked card (desktop), audio is unmuted.
-  - If the widget remains docked and hover ends, it becomes muted again.
+  - Initial volume defaults to `40%`.
+  - If the widget loads already docked, initial volume is `0%` (muted).
 
 ## Development Log (This chat)
 
 Implemented in this iteration:
 
+- Refactor and internal architecture:
+  - Extracted player lifecycle and controls state to `useYouTubePlayer`.
+  - Extracted drag/resize interactions to `useDragResize`.
+  - Extracted dock state/timers/position memo to `useDock`.
+  - Moved visual hover-only button color changes to CSS `:hover` classes.
 - Playback and controls:
   - Added controls visibility while paused.
   - Added top header overlay with YouTube metadata (`title`, `author`).

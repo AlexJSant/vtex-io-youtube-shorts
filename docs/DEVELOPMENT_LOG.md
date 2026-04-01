@@ -1,6 +1,6 @@
 # Development Log
 
-## Current State (after latest chat)
+## Current State (after latest refactor)
 
 - Dock behavior was fully reworked and stabilized.
 - Dock activation now uses a dedicated viewport rule:
@@ -9,6 +9,18 @@
   - right side of viewport (using `offsetX`),
   - vertically centered.
 - On load, when dock mode is active, widget starts docked.
+- Core logic was split into dedicated hooks:
+  - `react/useDock.ts`
+  - `react/useDragResize.ts`
+  - `react/useYouTubePlayer.ts`
+- `useYouTubePlayer` lifecycle was stabilized to avoid unnecessary iframe recreation:
+  - `isPlaying` and `startOnLoad` were removed from the main player init effect dependency list.
+  - The effect now reads these values through refs (`isPlayingRef`/`startOnLoadRef`) during `onReady`.
+  - This prevents `destroy/create` cycles when users trigger normal play/pause interactions.
+- Dock hook API was simplified:
+  - removed `dockAnchor` from `useDock` input/dependencies because it did not affect dock position calculation.
+  - added `applyDockMode(isDockedMode)` to encapsulate dock state transitions (`isDocked` + hover reset) and reduce coupling with `YoutubeShortsWidget`.
+- Hover-only visual states for action buttons were removed from React state and moved to CSS `:hover` rules.
 
 ## Dock Rules Implemented
 
@@ -31,11 +43,9 @@
 
 - `startOnLoad` autoplay remains active.
 - There is no public `muted` prop in schema/default props.
-- Docked audio behavior:
-  - if autoplay starts while docked, video starts muted,
-  - mouse over on dock-revealed card unmutes,
-  - mouse leave while still docked mutes again.
-- This behavior is documented in schema description for `startOnLoad`.
+- Initial load volume rule:
+  - default initial volume is `40%`,
+  - when the widget loads already docked, initial volume is forced to `0%` (muted).
 
 ## Widget UX and Core Behavior (kept)
 
@@ -64,8 +74,9 @@
 ## Known Trade-offs / Follow-ups
 
 - Dock rules are intentionally code-driven and not exposed in Site Editor.
-- Component remains large (player lifecycle + drag/resize + dock + controls in one file).
+- `YoutubeShortsWidget` became thinner, but still orchestrates layout and rendering of overlays/controls.
+- Dock bubble icon was extracted to a small presentational component (`DockBubbleIcon`) to keep main component render block cleaner.
 - Future improvement:
-  - split into hooks/components (`useDockBehavior`, `useYoutubePlayer`, etc.),
+  - split visual overlays/controls into smaller presentational components,
   - optionally expose some dock constants as advanced props.
 
