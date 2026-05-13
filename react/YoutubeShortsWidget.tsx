@@ -53,11 +53,11 @@ const DEFAULT_INITIAL_VOLUME = 20
  * Mobile — “bolinha cinza” quando o widget está acoplado (doca).
  * Ajuste tamanho, cor e deslocamento fino em relação à borda direita do card.
  */
-const MOBILE_DOCK_BUBBLE_SIZE_PX = 96
-const MOBILE_DOCK_BUBBLE_OFFSET_X_PX = 0
+const MOBILE_DOCK_BUBBLE_SIZE_PX = 72
+const MOBILE_DOCK_BUBBLE_OFFSET_X_PX = 20
 const MOBILE_DOCK_BUBBLE_OFFSET_Y_PX = 0
 const MOBILE_DOCK_BUBBLE_BACKGROUND = 'rgba(0,0,0,0.35)'
-const MOBILE_DOCK_BUBBLE_ICON_SIZE_PX = 16
+const MOBILE_DOCK_BUBBLE_ICON_SIZE_PX = 28
 /** Camada mobile “tela cheia” (acima da bolinha zIndex 10000). */
 const MOBILE_EXPAND_Z = 100005
 const MOBILE_EXPAND_CLOSE_Z = 100006
@@ -72,7 +72,8 @@ function DockBubbleIcon({ sizePx }: { sizePx: number }) {
       viewBox="0 0 16 16"
       style={{ pointerEvents: 'none' }}
     >
-      <path d="M2.5 3.5a.5.5 0 0 1 0-1h11a.5.5 0 0 1 0 1zm2-2a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1zM0 13a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 16 13V6a1.5 1.5 0 0 0-1.5-1.5h-13A1.5 1.5 0 0 0 0 6zm6.258-6.437a.5.5 0 0 1 .507.013l4 2.5a.5.5 0 0 1 0 .848l-4 2.5A.5.5 0 0 1 6 12V7a.5.5 0 0 1 .258-.437" />
+      {/* <path d="M2.5 3.5a.5.5 0 0 1 0-1h11a.5.5 0 0 1 0 1zm2-2a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1zM0 13a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 16 13V6a1.5 1.5 0 0 0-1.5-1.5h-13A1.5 1.5 0 0 0 0 6zm6.258-6.437a.5.5 0 0 1 .507.013l4 2.5a.5.5 0 0 1 0 .848l-4 2.5A.5.5 0 0 1 6 12V7a.5.5 0 0 1 .258-.437" /> */}
+      <path d="M0 12V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2m6.79-6.907A.5.5 0 0 0 6 5.5v5a.5.5 0 0 0 .79.407l3.5-2.5a.5.5 0 0 0 0-.814z" />
     </svg>
   )
 }
@@ -229,6 +230,8 @@ const YoutubeShortsWidget: any = ({
 
   // Posição do card (fixo com scroll).
   const [pos, setPos] = useState<Pos>({ left: 16, top: 16 })
+  /** Só libera o card visualmente após o primeiro posicionamento (evita flash no canto inicial). */
+  const [layoutCardReady, setLayoutCardReady] = useState(false)
   const posRef = useRef(pos)
   posRef.current = pos
 
@@ -242,7 +245,7 @@ const YoutubeShortsWidget: any = ({
     })
   }, [])
 
-  const showMobileControls = useCallback(() => {}, [])
+  const showMobileControls = useCallback(() => { }, [])
 
   // Reset correto em SPA quando trocar de PDP (props mudam).
   useEffect(() => {
@@ -347,9 +350,30 @@ const YoutubeShortsWidget: any = ({
     mobileOffsetY,
   ])
 
-  // Ajuste inicial para posição configurada.
-  useEffect(() => {
-    applyInitialPosition()
+  // Ajuste inicial para posição configurada (layout phase → antes do paint quando possível).
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return
+
+    setLayoutCardReady(false)
+
+    let raf = 0
+    const run = () => {
+      applyInitialPosition()
+      setLayoutCardReady(true)
+    }
+
+    if (cardRef.current) {
+      run()
+    } else {
+      raf = window.requestAnimationFrame(() => {
+        raf = 0
+        run()
+      })
+    }
+
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf)
+    }
   }, [videoId, spaKey, applyInitialPosition])
 
   // Re-clamp em resize.
@@ -550,6 +574,7 @@ const YoutubeShortsWidget: any = ({
     : 0
   const dockCardHiddenMobile = isDockMode && isMobile && isDocked
   const dockCardHiddenDesktop = !isMobile && isDockMode && isDocked && !isDockHovering
+  const layoutCardHidden = !layoutCardReady
   const dockVisibleSliceWidth = Math.max(
     DOCK_VISIBLE_SLICE_MIN_PX,
     Math.round(size.width * DOCK_VISIBLE_SLICE_RATIO),
@@ -622,10 +647,12 @@ const YoutubeShortsWidget: any = ({
             top: mobileDockBubbleTop,
             width: mobileDockBubbleSize,
             height: mobileDockBubbleSize,
-            zIndex: 10000,
+            // zIndex: 10000,
+            zIndex: 999,
             pointerEvents: 'auto',
             background: MOBILE_DOCK_BUBBLE_BACKGROUND,
-            borderRadius: 999,
+            // borderRadius: 999,
+            borderRadius: '50px 0 0 50px',
             boxShadow: '0 0 0 1px rgba(255,255,255,0.08) inset',
             cursor: 'pointer',
             opacity: 1,
@@ -670,15 +697,17 @@ const YoutubeShortsWidget: any = ({
             dockHiddenTranslateXPx > 0
               ? `translateX(${dockHiddenTranslateXPx}px)`
               : 'none',
-          opacity: dockCardHiddenMobile ? 0 : 1,
+          opacity: layoutCardHidden ? 0 : dockCardHiddenMobile ? 0 : 1,
+          visibility: layoutCardHidden ? 'hidden' : 'visible',
           pointerEvents:
-            dockCardHiddenMobile || dockCardHiddenDesktop
+            layoutCardHidden || dockCardHiddenMobile || dockCardHiddenDesktop
               ? 'none'
               : isMobile && isMobileExpanded
                 ? 'none'
                 : 'auto',
           transition: 'transform .2s ease-in-out, opacity .2s ease-in-out',
         }}
+        aria-hidden={layoutCardHidden ? true : undefined}
         aria-label="YouTube Shorts widget"
         onMouseEnter={() => {
           setIsHovering(true)
@@ -746,17 +775,22 @@ const YoutubeShortsWidget: any = ({
             overflow: 'hidden',
             position: isMobile && isMobileExpanded ? 'fixed' : 'relative',
             background: '#000',
+            // Com o card em `pointer-events: none` no mobile expandido, o hit-test ignora
+            // o card inteiro a menos que este shell reabilite toques (MDN: filhos precisam
+            // de `pointer-events: auto` explícito).
+            pointerEvents: isMobile && isMobileExpanded ? 'auto' : undefined,
+            isolation: isMobile && isMobileExpanded ? 'isolate' : undefined,
             ...(isMobile && isMobileExpanded
               ? {
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  width: '100vw',
-                  height: '100dvh',
-                  zIndex: MOBILE_EXPAND_Z,
-                  boxSizing: 'border-box' as const,
-                }
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                width: '100vw',
+                height: '100dvh',
+                zIndex: MOBILE_EXPAND_Z,
+                boxSizing: 'border-box' as const,
+              }
               : {}),
           }}
         >
@@ -764,13 +798,17 @@ const YoutubeShortsWidget: any = ({
             <button
               type="button"
               data-no-drag="true"
-              onClick={exitMobileExpandedToDocked}
+              onClick={(e) => {
+                e.stopPropagation()
+                exitMobileExpandedToDocked()
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
               aria-label="Sair da tela cheia e ocultar"
               title="Fechar"
               style={{
                 position: 'absolute',
                 top: 'max(10px, env(safe-area-inset-top, 0px))',
-                right: 'max(10px, env(safe-area-inset-right, 0px))',
+                left: 'max(10px, env(safe-area-inset-left, 0px))',
                 zIndex: MOBILE_EXPAND_CLOSE_Z,
                 width: 44,
                 height: 44,
@@ -784,6 +822,10 @@ const YoutubeShortsWidget: any = ({
                 alignItems: 'center',
                 justifyContent: 'center',
                 boxShadow: '0 2px 12px rgba(0,0,0,0.35)',
+                pointerEvents: 'auto',
+                touchAction: 'manipulation',
+                WebkitTapHighlightColor: 'transparent',
+                transform: 'translateZ(0)',
               }}
             >
               <svg

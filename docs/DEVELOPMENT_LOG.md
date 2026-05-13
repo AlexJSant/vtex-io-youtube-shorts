@@ -60,6 +60,12 @@
 - SPA route reset/reload handling:
   - internal state reset on route transitions.
 
+## Mobile expanded fullscreen (bolinha → viewport)
+
+- After the dock bubble opens the player in expanded fullscreen, the outer card keeps `pointer-events: none` so drag logic does not capture touches; the fullscreen shell (`mobileFullscreenShellRef`) sets `pointer-events: auto` (plus `isolation: isolate` and close-button touch/compositing hints) so the close control reliably receives taps on small viewports.
+- Close calls `exitMobileExpandedToDocked`: leaves expanded/fullscreen state and returns to docked UI; it does **not** set `isClosed` (iframe stays mounted), unlike the desktop `closable` X which unmounts the embed.
+- Expanded close button is top-aligned with safe-area padding, anchored on the **left** (`max(10px, env(safe-area-inset-*))` for top and left).
+
 ## Schema / Config Notes
 
 - Public schema props currently include:
