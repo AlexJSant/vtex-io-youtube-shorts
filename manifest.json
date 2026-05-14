@@ -1,7 +1,7 @@
 {
   "vendor": "sunhouse",
   "name": "youtube-shorts-widget",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "title": "YouTube Shorts Widget",
   "description": "Floating, draggable YouTube Shorts/video widget for storefronts. Supports 9:16 aspect ratio, desktop/mobile layouts, player controls, fullscreen, and customizable display.",
   "builders": {
