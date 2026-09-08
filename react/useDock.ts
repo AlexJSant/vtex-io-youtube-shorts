@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getViewportWidth } from './viewport'
 
 type Pos = { left: number; top: number }
 
@@ -8,7 +9,7 @@ function clamp(n: number, min: number, max: number) {
 
 function useDock(options: {
   isDockMode: boolean
-  isMobile: boolean
+  isCompact: boolean
   dockOffsetX: number
   size: { width: number; height: number }
   pos: Pos
@@ -37,8 +38,9 @@ function useDock(options: {
 
   const dockPos = useMemo(() => {
     if (typeof window === 'undefined') return { left: pos.left, top: pos.top }
-    const rightEdgeX = window.innerWidth - dockOffsetX
-    const left = clamp(rightEdgeX - size.width, 0, window.innerWidth - size.width)
+    const viewportWidth = getViewportWidth()
+    const rightEdgeX = viewportWidth - dockOffsetX
+    const left = clamp(rightEdgeX - size.width, 0, viewportWidth - size.width)
     const top = (window.innerHeight - size.height) / 2
     const clampedTop = clamp(top, 0, window.innerHeight - size.height)
     return { left, top: clampedTop }

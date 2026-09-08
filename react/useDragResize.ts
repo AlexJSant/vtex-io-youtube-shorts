@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { getViewportWidth } from './viewport'
 
 type Pos = { left: number; top: number }
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
-const ASPECT_RATIO_W_H = 9 / 16
-const MIN_WIDTH = 200
-const MAX_WIDTH = 350
-const LONG_PRESS_MS = 180
+/** Acima desta duração o gesto deixa de ser considerado toque, mesmo sem movimento. */
+const TAP_MAX_DURATION_MS = 180
 const TAP_MOVE_TOLERANCE_PX = 8
 const EDGE_THRESHOLD_PX = 10
 const CORNER_THRESHOLD_PX = 14
+
+/** Alça de drag renderizada fora do box do card (abaixo da borda inferior). */
+export const DRAG_HANDLE_SELECTOR = '[data-ytw-drag-handle="true"]'
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
@@ -21,7 +23,7 @@ function useDragResize(options: {
   setPosThrottled: (pos: Pos) => void
   size: { width: number; height: number }
   setSize: React.Dispatch<React.SetStateAction<{ width: number; height: number }>>
-  isMobile: boolean
+  isCompact: boolean
   isDockMode: boolean
   isVideoPlaying: boolean
   dockPosRef: React.MutableRefObject<Pos>
@@ -30,6 +32,12 @@ function useDragResize(options: {
   setIsDockHovering: (v: boolean) => void
   setPos: React.Dispatch<React.SetStateAction<Pos>>
   onTapToggle?: () => void
+  /** Espaço ocupado abaixo do card (alça de drag) que deve caber na viewport. */
+  bottomReservedPx?: number
+  /** Proporção largura/altura preservada no resize (9/16 no padrão, 16/9 no modo Live). */
+  aspectRatioWH: number
+  minWidth: number
+  maxWidth: number
 }): {
   resizeCursor: string | null
   onPointerDownCard: (e: React.PointerEvent<HTMLDivElement>) => void
@@ -42,7 +50,7 @@ function useDragResize(options: {
     setPosThrottled,
     size,
     setSize,
-    isMobile,
+    isCompact,
     isDockMode,
     isVideoPlaying,
     dockPosRef,
@@ -51,7 +59,25 @@ function useDragResize(options: {
     setIsDockHovering,
     setPos,
     onTapToggle,
+    bottomReservedPx = 0,
+    aspectRatioWH,
+    minWidth,
+    maxWidth,
   } = options
+
+  const maxTopFor = useCallback(
+    (height: number) => Math.max(0, window.innerHeight - height - bottomReservedPx),
+    [bottomReservedPx],
+  )
+
+  const heightFor = useCallback(
+    (width: number) => Math.round(width / aspectRatioWH),
+    [aspectRatioWH],
+  )
+  const widthFor = useCallback(
+    (height: number) => Math.round(height * aspectRatioWH),
+    [aspectRatioWH],
+  )
 
   const [resizeCursor, setResizeCursor] = useState<string | null>(null)
   const lastResizeCursorRef = useRef<string | null>(null)
@@ -65,7 +91,10 @@ function useDragResize(options: {
     startTop: number
     width: number
     height: number
+    /** Vira `true` assim que o ponteiro passa da tolerância de toque. */
+    hasMoved: boolean
   } | null>(null)
+  /** Ausente quando o arrasto começa pela alça: ela não tem janela de toque nem tap. */
   const pressRef = useRef<{
     pointerId: number
     startClientX: number
@@ -91,6 +120,11 @@ function useDragResize(options: {
 
   const getResizeEdgeFromPoint = useCallback(
     (x: number, y: number, rect: DOMRect): ResizeEdge | null => {
+      // Elementos fora do box do card (ex.: alça de drag) não redimensionam:
+      // sem esse guarda, um ponto abaixo de `rect.bottom` gera distância
+      // negativa e passaria no teste de proximidade da borda sul.
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null
+
       const leftDist = x - rect.left
       const rightDist = rect.right - x
       const topDist = y - rect.top
@@ -150,11 +184,14 @@ function useDragResize(options: {
       // Não inicia drag em botões/inputs/elementos explicitamente marcados.
       if (target?.closest('button, input, select, textarea, [data-no-drag="true"]')) return
 
+      const fromHandle = !!target?.closest(DRAG_HANDLE_SELECTOR)
+
       const rect = cardRef.current.getBoundingClientRect()
       const width = rect.width || size.width
       const height = rect.height || size.height
 
-      const edge = isMobile ? null : getResizeEdgeFromPoint(e.clientX, e.clientY, rect)
+      const edge =
+        isCompact || fromHandle ? null : getResizeEdgeFromPoint(e.clientX, e.clientY, rect)
       if (edge) {
         resizeRef.current = {
           pointerId: e.pointerId,
@@ -184,17 +221,22 @@ function useDragResize(options: {
         startTop: posRef.current.top,
         width,
         height,
+        hasMoved: false,
       }
-      pressRef.current = {
-        pointerId: e.pointerId,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startLeft: posRef.current.left,
-        startTop: posRef.current.top,
-        width,
-        height,
-        startedAtMs: performance.now(),
-      }
+
+      // A alça arrasta de imediato: sem janela de toque e sem toque-para-pausar.
+      pressRef.current = fromHandle
+        ? null
+        : {
+          pointerId: e.pointerId,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          startLeft: posRef.current.left,
+          startTop: posRef.current.top,
+          width,
+          height,
+          startedAtMs: performance.now(),
+        }
 
       try {
         e.currentTarget.setPointerCapture(e.pointerId)
@@ -203,7 +245,7 @@ function useDragResize(options: {
       }
       e.preventDefault()
     },
-    [cardRef, getResizeEdgeFromPoint, isMobile, posRef, size.height, size.width],
+    [cardRef, getResizeEdgeFromPoint, isCompact, posRef, size.height, size.width],
   )
 
   const onPointerMoveCard = useCallback(
@@ -223,8 +265,11 @@ function useDragResize(options: {
         let nextLeft = r.startLeft
         let nextTop = r.startTop
 
-        const minHeight = Math.round((MIN_WIDTH * 16) / 9)
-        const maxHeight = Math.round((MAX_WIDTH * 16) / 9)
+        const minHeight = heightFor(minWidth)
+        const maxHeight = heightFor(maxWidth)
+        // Com limites de largura maiores, a altura derivada pode estourar a viewport
+        // antes de a largura atingir o teto.
+        const maxWidthByViewportHeight = widthFor(maxTopFor(0))
 
         // Horizontal resizing has priority when edge includes left/right.
         if (
@@ -237,18 +282,18 @@ function useDragResize(options: {
         ) {
           if (r.edge === 'e' || r.edge === 'ne' || r.edge === 'se') {
             nextWidth = r.startWidth + dx
-            const maxW = Math.min(MAX_WIDTH, window.innerWidth - r.startLeft)
-            nextWidth = clamp(nextWidth, MIN_WIDTH, maxW)
+            const maxW = Math.min(maxWidth, maxWidthByViewportHeight, getViewportWidth() - r.startLeft)
+            nextWidth = clamp(nextWidth, minWidth, maxW)
           } else {
             // 'w' / 'nw' / 'sw'
             const fixedRight = r.startLeft + r.startWidth
             nextWidth = r.startWidth - dx
-            const maxW = Math.min(MAX_WIDTH, fixedRight)
-            nextWidth = clamp(nextWidth, MIN_WIDTH, maxW)
+            const maxW = Math.min(maxWidth, maxWidthByViewportHeight, fixedRight)
+            nextWidth = clamp(nextWidth, minWidth, maxW)
             nextLeft = fixedRight - nextWidth
           }
 
-          nextHeight = Math.round((nextWidth * 16) / 9)
+          nextHeight = heightFor(nextWidth)
 
           if (includesN) {
             const fixedBottom = r.startTop + r.startHeight
@@ -262,7 +307,7 @@ function useDragResize(options: {
           // Vertical resize only
           if (r.edge === 's') {
             nextHeight = r.startHeight + dy
-            const maxH = Math.min(window.innerHeight - r.startTop, maxHeight)
+            const maxH = Math.min(maxTopFor(0) - r.startTop, maxHeight)
             nextHeight = clamp(nextHeight, minHeight, maxH)
             nextTop = r.startTop
           } else {
@@ -274,15 +319,15 @@ function useDragResize(options: {
             nextTop = fixedBottom - nextHeight
           }
 
-          nextWidth = Math.round(nextHeight * ASPECT_RATIO_W_H)
-          nextHeight = Math.round((nextWidth * 16) / 9)
+          nextWidth = widthFor(nextHeight)
+          nextHeight = heightFor(nextWidth)
         }
 
         // Clamps finais dentro da viewport
         nextWidth = Math.round(nextWidth)
         nextHeight = Math.round(nextHeight)
-        nextLeft = clamp(nextLeft, 0, window.innerWidth - nextWidth)
-        nextTop = clamp(nextTop, 0, window.innerHeight - nextHeight)
+        nextLeft = clamp(nextLeft, 0, getViewportWidth() - nextWidth)
+        nextTop = clamp(nextTop, 0, maxTopFor(nextHeight))
 
         setSize({ width: nextWidth, height: nextHeight })
         setPosThrottled({ left: nextLeft, top: nextTop })
@@ -297,20 +342,22 @@ function useDragResize(options: {
         const dy = e.clientY - d.startClientY
         const press = pressRef.current
 
-        if (press && press.pointerId === e.pointerId) {
-          const elapsedMs = performance.now() - press.startedAtMs
-          if (elapsedMs < LONG_PRESS_MS) return
+        // A distinção entre toque e arrasto é por distância, não por tempo: esperar
+        // uma janela fixa antes de mover deixava o card travado no início do gesto.
+        if (press && press.pointerId === e.pointerId && !d.hasMoved) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) <= TAP_MOVE_TOLERANCE_PX) return
+          d.hasMoved = true
         }
 
-        const nextLeft = clamp(d.startLeft + dx, 0, window.innerWidth - d.width)
-        const nextTop = clamp(d.startTop + dy, 0, window.innerHeight - d.height)
+        const nextLeft = clamp(d.startLeft + dx, 0, getViewportWidth() - d.width)
+        const nextTop = clamp(d.startTop + dy, 0, maxTopFor(d.height))
 
         setPosThrottled({ left: nextLeft, top: nextTop })
         return
       }
 
       // Atualiza cursor nas bordas/cantos quando não está arrastando/redimensionando.
-      if (isMobile) return
+      if (isCompact) return
       if (!cardRef.current) return
       const rect = cardRef.current.getBoundingClientRect()
       const edge = getResizeEdgeFromPoint(e.clientX, e.clientY, rect)
@@ -321,7 +368,19 @@ function useDragResize(options: {
         setResizeCursor(cursor)
       }
     },
-    [cardRef, getCursorForEdge, getResizeEdgeFromPoint, isMobile, setPosThrottled, setSize],
+    [
+      cardRef,
+      getCursorForEdge,
+      getResizeEdgeFromPoint,
+      heightFor,
+      isCompact,
+      maxTopFor,
+      maxWidth,
+      minWidth,
+      setPosThrottled,
+      setSize,
+      widthFor,
+    ],
   )
 
   const onPointerUpCard = useCallback(
@@ -340,16 +399,15 @@ function useDragResize(options: {
       dragRef.current = null
       pressRef.current = null
 
-      if (!press || press.pointerId !== e.pointerId) {
-        e.preventDefault()
-        return
+      // Arrasto pela alça nunca conta como toque; o snap da doca segue valendo.
+      let isTap = false
+      if (press && press.pointerId === e.pointerId && !d.hasMoved) {
+        const elapsedMs = performance.now() - press.startedAtMs
+        const movedX = Math.abs(e.clientX - d.startClientX)
+        const movedY = Math.abs(e.clientY - d.startClientY)
+        const moved = Math.max(movedX, movedY)
+        isTap = elapsedMs < TAP_MAX_DURATION_MS && moved <= TAP_MOVE_TOLERANCE_PX
       }
-
-      const elapsedMs = performance.now() - press.startedAtMs
-      const movedX = Math.abs(e.clientX - d.startClientX)
-      const movedY = Math.abs(e.clientY - d.startClientY)
-      const moved = Math.max(movedX, movedY)
-      const isTap = elapsedMs < LONG_PRESS_MS && moved <= TAP_MOVE_TOLERANCE_PX
       void isVideoPlaying
 
       if (isTap) {
@@ -365,7 +423,7 @@ function useDragResize(options: {
         // do espaço disponível entre o meio da tela e o lado direito.
         const currentRightEdge = current.left + size.width
         const dockRightEdge = dock.left + size.width
-        const regionLeftX = window.innerWidth / 2
+        const regionLeftX = getViewportWidth() / 2
         const regionWidth = Math.max(0, dockRightEdge - regionLeftX)
         const dockRightEdgeMin = dockRightEdge - regionWidth * 0.1
         const shouldDock = currentRightEdge >= dockRightEdgeMin
@@ -399,10 +457,10 @@ function useDragResize(options: {
   // Mantém o widget dentro dos limites da janela ao redimensionar.
   useEffect(() => {
     setPos((p) => ({
-      left: clamp(p.left, 0, window.innerWidth - size.width),
-      top: clamp(p.top, 0, window.innerHeight - size.height),
+      left: clamp(p.left, 0, getViewportWidth() - size.width),
+      top: clamp(p.top, 0, maxTopFor(size.height)),
     }))
-  }, [setPos, size.width, size.height])
+  }, [maxTopFor, setPos, size.width, size.height])
 
   return {
     resizeCursor,

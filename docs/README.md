@@ -4,28 +4,46 @@ Floating widget that renders a YouTube embed (Shorts or video) on the storefront
 
 Current behavior (updated):
 
-- Draggable by any non-interactive area of the card.
-- Resizable from borders/corners on desktop (keeps 9:16 aspect ratio).
+- Draggable by any non-interactive area of the card, plus a dedicated drag handle bar
+  attached under the card (see *Drag handle* below).
+- Resizable from borders/corners on desktop, preserving the configured aspect ratio.
 - Hover controls with progress, play/pause and volume.
 - Volume control uses a single visual component: circular button in idle state, expanding upward on hover to reveal the vertical slider.
 - Volume expansion is overlayed and does not shift neighboring controls.
-- Dock mode is active when viewport width is below `DOCK_ACTIVATION_MAX_WIDTH` (internal constant in component code).
+- Dock mode is active when the viewport width is below `DOCK_ACTIVATION_MAX_WIDTH`
+  (internal constant), and **always** when `aspectRatio` is `widescreen` or
+  `forceCompactMode` is enabled.
 - In dock mode, the widget starts docked at the right side of the viewport, vertically centered.
 - Docked desktop state hides by position offset, keeping a visible slice; hover on the dock slice reveals the full card.
 - If still docked, leaving hover hides it again.
-- Docked mobile state hides the card and keeps a gray circular bubble visible.
+- Docked compact state hides the card and keeps a gray bubble visible on the right edge.
 - Controls remain visible when video is paused.
-- Video header (title + author/channel from YouTube metadata) appears on hover (desktop) and on tap (mobile).
 - Floating `×` close button.
 - Optional infinite loop playback (`looping` prop).
 - Auto reset/reload when the SPA route changes.
-- Dedicated mobile behavior for viewports below `1024px`:
+- Compact mode, automatic for viewports below `1024px` and forceable on any width via
+  `forceCompactMode`:
   - Fixed widget size (no manual resize).
-  - Widget remains draggable by touch.
-  - Dedicated control overlay with auto-hide on tap interactions.
-  - Fullscreen button for video.
+  - Widget remains draggable.
+  - Video hidden behind the side bubble; tapping it opens the player fullscreen.
+  - Native YouTube controls inside the embed.
+- Optional native YouTube controls on any viewport (`nativeYoutubeControls` / `liveMode`),
+  enabling the player's own fullscreen and "watch on YouTube" actions.
+- Optional 16:9 aspect ratio (`aspectRatio` / `liveMode`) with a wider resize range.
 - Hover visual effects use `transition: .3s ease-in-out` in interactive UI controls.
 - Action button hover color is handled via CSS `:hover` classes (instead of React hover state for button color).
+
+### Drag handle
+
+A horizontal bar sits directly under the card's bottom edge, with a centered 6-dot grip
+icon. It exists because native YouTube controls make the iframe swallow pointer events —
+without it, the card could not be moved in those modes.
+
+- Spans the full card width and follows it while resizing.
+- Starts dragging immediately, with no tap-to-pause side effect.
+- Hidden while the widget is docked and while in compact fullscreen.
+- While it is visible, the video keeps only its top corners rounded, so the handle
+  closes the assembly without a visible seam.
 
 ![Media Placeholder](https://user-images.githubusercontent.com/52087100/71204177-42ca4f80-227e-11ea-89e6-e92e65370c69.png)
 
@@ -54,13 +72,17 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
   },
   "youtube-shorts-widget": {
     "props": {
-      "shortsUrl": "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+      "shortsUrl": "https://www.youtube.com/embed/dQw4w9WgXcQ",
       "startOnLoad": true,
       "closable": true,
       "looping": true,
+      "forceCompactMode": false,
+      "liveMode": false,
+      "nativeYoutubeControls": false,
+      "aspectRatio": "vertical",
       "desktopAnchor": "bottom-right",
-      "desktopOffsetX": 16,
-      "desktopOffsetY": 16,
+      "desktopOffsetX": 32,
+      "desktopOffsetY": 108,
       "mobileAnchor": "bottom-right",
       "mobileOffsetX": 12,
       "mobileOffsetY": 12
@@ -79,18 +101,27 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 
 | Prop name | Type | Description | Default value |
 | ---------- | ---- | ----------- | ------------- |
-| `shortsUrl` | `string` | YouTube URL (Shorts or `watch?v=<id>`). | `''` |
+| `shortsUrl` | `string` | YouTube URL. Preferred format: `https://www.youtube.com/embed/{id}`. | `''` |
 | `startOnLoad` | `boolean` | If `true`, mounts the iframe and starts playback when the block loads. | `true` |
 | `closable` | `boolean` | If `true`, shows the `×` close button and allows unmounting. | `true` |
 | `looping` | `boolean` | If `true`, the video restarts automatically when it ends (infinite loop). | `true` |
+| `forceCompactMode` | `boolean` | Forces compact mode (video hidden behind the right-side bubble) on any viewport width, not only below `1024px`. | `false` |
+| `liveMode` | `boolean` | Shortcut that enables native YouTube controls **and** the 16:9 ratio at once. Equivalent to setting `nativeYoutubeControls` and `aspectRatio: 'widescreen'`. | `false` |
+| `nativeYoutubeControls` | `boolean` | Replaces the custom control/drag overlay with the native YouTube controls (fullscreen, watch on YouTube). The card is still moved by the drag handle. | `false` |
+| `aspectRatio` | `'vertical'` \| `'widescreen'` | Card aspect ratio: `vertical` is 9:16 (Shorts/Reels), `widescreen` is 16:9. | `'vertical'` |
 | `desktopAnchor` | `top-left` \| `top-right` \| `bottom-left` \| `bottom-right` | Initial widget anchor in desktop view. | `'bottom-right'` |
 | `desktopOffsetX` | `number` | Horizontal offset in desktop view (px). | `32` |
-| `desktopOffsetY` | `number` | Vertical offset in desktop view (px). | `32` |
+| `desktopOffsetY` | `number` | Vertical offset in desktop view (px). | `108` |
 | `mobileAnchor` | `top-left` \| `top-right` \| `bottom-left` \| `bottom-right` | Initial widget anchor in mobile view (`<1024px`). | `'bottom-right'` |
 | `mobileOffsetX` | `number` | Horizontal offset in mobile view (px). | `12` |
 | `mobileOffsetY` | `number` | Vertical offset in mobile view (px). | `12` |
 
 > Note: `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY`, `mobileAnchor`, `mobileOffsetX`, and `mobileOffsetY` are not exposed in Site Editor controls. Keep using code/block props for these values.
+
+> The three display props are independent and can be combined freely. `liveMode` is only
+> a convenience preset: `nativeYoutubeControls` gives you native controls while keeping
+> the vertical format, and `aspectRatio: 'widescreen'` gives you 16:9 while keeping the
+> custom controls.
 
 ### Notes
 
@@ -99,20 +130,23 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 - Looping uses YouTube embed loop params and a fallback replay when the player reaches the `ended` state.
 - Playback state is reset when the store SPA URL changes.
 - Widget position is recalculated from the configured anchor/offsets on full reload and SPA route changes.
-- Mobile mode is considered when viewport width is lower than `1024px`.
-- Dock mode is considered when viewport width is lower than `DOCK_ACTIVATION_MAX_WIDTH` (currently `1620` in `react/YoutubeShortsWidget.tsx`).
+- Compact mode is considered when viewport width is lower than `1024px`, or whenever `forceCompactMode` is enabled.
+- Dock mode is considered when viewport width is lower than `DOCK_ACTIVATION_MAX_WIDTH` (currently `1620` in `react/YoutubeShortsWidget.tsx`), and is always active for `aspectRatio: 'widescreen'` and for `forceCompactMode`.
+- Horizontal geometry uses `getViewportWidth()` (`react/viewport.ts`) instead of `window.innerWidth`, because the latter includes the desktop scrollbar and pushes right-anchored fixed elements under it.
+- Resize ranges: vertical `200–350px`; widescreen `240–1280px`. Widescreen resize is additionally capped by the available viewport height.
+- With native controls, only the top/left/right edges resize the card; the bottom edge is left to the YouTube control bar.
 - Position controls:
   - `desktopAnchor`, `desktopOffsetX`, `desktopOffsetY` define initial position in desktop.
   - `mobileAnchor`, `mobileOffsetX`, `mobileOffsetY` define initial position in mobile.
 - Internally, dock state changes triggered by initial positioning are handled through the dock hook API (`applyDockMode`) to keep widget code decoupled from dock state internals.
 - Initial position props are intentionally hidden from Site Editor and should be configured only via code/props.
-- Mobile interaction:
-  - Tap shows controls for a short period.
-  - Fullscreen is available via dedicated control button.
+- Compact interaction:
+  - The video is hidden while docked; the side bubble opens it fullscreen.
+  - Controls inside the embed are the native YouTube ones.
   - Dragging is enabled; edge-based resize is disabled.
 - Audio on load:
   - There is no `muted` prop anymore.
-  - Initial volume defaults to `40%`.
+  - Initial volume defaults to `20%` (`DEFAULT_INITIAL_VOLUME`).
   - If the widget loads already docked, initial volume is `0%` (muted).
 
 ## Development Log (This chat)
@@ -141,6 +175,18 @@ Implemented in this iteration:
 - Mobile fullscreen:
   - Added fullscreen action button in mobile controls.
   - Uses Fullscreen API (`requestFullscreen`, with webkit fallback).
+
+Later iteration (superseding parts of the list above):
+
+- Added the drag handle bar under the card.
+- Added `forceCompactMode`, `liveMode`, `nativeYoutubeControls` and `aspectRatio` props.
+- Compact mode replaced the custom mobile control overlay with native YouTube controls,
+  so the tap-to-show/auto-hide overlay and the YouTube metadata header are no longer
+  rendered.
+- Aspect ratio and width limits became configurable (9:16 and 16:9).
+- Fixed the drag start delay and the right-edge offset caused by the desktop scrollbar.
+
+See `docs/DEVELOPMENT_LOG.md` for the detailed record.
 
 ## Modus Operandi *(not mandatory)*
 

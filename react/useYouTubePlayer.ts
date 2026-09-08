@@ -59,7 +59,7 @@ function useYouTubePlayer(options: {
   startOnLoad: boolean
   isPlaying: boolean
   isHovering: boolean
-  isMobile: boolean
+  isCompact: boolean
   showMobileControls: () => void
 }): {
   playerReady: boolean
@@ -83,7 +83,7 @@ function useYouTubePlayer(options: {
     startOnLoad,
     isPlaying,
     isHovering,
-    isMobile,
+    isCompact,
     showMobileControls,
   } = options
 
@@ -225,7 +225,7 @@ function useYouTubePlayer(options: {
     const p = playerRef.current
     if (!p) return
 
-    if (isMobile) showMobileControls()
+    if (isCompact) showMobileControls()
 
     try {
       if (isVideoPlaying) p.pauseVideo?.()
@@ -233,7 +233,7 @@ function useYouTubePlayer(options: {
     } catch {
       // noop
     }
-  }, [isMobile, isVideoPlaying, showMobileControls])
+  }, [isCompact, isVideoPlaying, showMobileControls])
 
   const onSeekFromPercent = useCallback(
     (percent: number) => {
@@ -241,7 +241,7 @@ function useYouTubePlayer(options: {
       if (!p) return
       if (!progress.duration) return
 
-      if (isMobile) showMobileControls()
+      if (isCompact) showMobileControls()
 
       const seconds = (clamp(percent, 0, 100) / 100) * progress.duration
       try {
@@ -250,12 +250,12 @@ function useYouTubePlayer(options: {
         // noop
       }
     },
-    [isMobile, progress.duration, showMobileControls],
+    [isCompact, progress.duration, showMobileControls],
   )
 
   const onVolumeChange = useCallback((next: number) => {
     setVolume(next)
-    if (isMobile) showMobileControls()
+    if (isCompact) showMobileControls()
     const p = playerRef.current
     if (!p) return
     try {
@@ -263,7 +263,7 @@ function useYouTubePlayer(options: {
     } catch {
       // noop
     }
-  }, [isMobile, showMobileControls])
+  }, [isCompact, showMobileControls])
 
   const pauseVideo = useCallback(() => {
     try {

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import useDock from './useDock'
 import useDragResize from './useDragResize'
 import useYouTubePlayer from './useYouTubePlayer'
+import { getViewportWidth } from './viewport'
 
 type YoutubeShortsWidgetProps = {
   /**
@@ -27,6 +28,20 @@ type YoutubeShortsWidgetProps = {
   mobileOffsetX: number
   /** Distância vertical inicial no mobile (px). */
   mobileOffsetY: number
+  /**
+   * Força o modo compacto (vídeo oculto atrás do botão lateral direito, controles
+   * nativos do YouTube) em qualquer largura de tela, não só em viewports estreitas.
+   */
+  forceCompactMode: boolean
+  /**
+   * Modo Live: atalho que liga de uma vez os controles nativos do YouTube e a
+   * proporção 16:9. As duas props abaixo permitem ligar cada parte isoladamente.
+   */
+  liveMode: boolean
+  /** Troca a camada própria de arraste/controles pelos controles nativos do YouTube. */
+  nativeYoutubeControls: boolean
+  /** Proporção do card: vertical (Shorts/Reels) ou 16:9. */
+  aspectRatio: 'vertical' | 'widescreen'
 }
 
 type Pos = { left: number; top: number }
@@ -36,7 +51,7 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
 }
 
-function isMobileViewport() {
+function isNarrowViewport() {
   if (typeof window === 'undefined') return false
   return window.innerWidth < 1024
 }
@@ -44,7 +59,27 @@ function isMobileViewport() {
 // Regra para ativar o comportamento de “doca escondida”.
 const DOCK_ACTIVATION_MAX_WIDTH = 1620
 const ASPECT_RATIO_W_H = 9 / 16
-const MOBILE_FIXED_WIDTH = 150
+const DEFAULT_WIDTH = 200
+const MIN_WIDTH = 200
+const MAX_WIDTH = 350
+/** Largura fixa do card no modo compacto (viewport estreita ou `forceCompactMode`). */
+const COMPACT_FIXED_WIDTH = 150
+
+/**
+ * Proporção 16:9 — precisa de mais largura que o Shorts para a barra de controles
+ * do player caber com conforto.
+ */
+const WIDESCREEN_ASPECT_RATIO_W_H = 16 / 9
+const WIDESCREEN_DEFAULT_WIDTH = 480
+const WIDESCREEN_MIN_WIDTH = 240
+const WIDESCREEN_MAX_WIDTH = 1280
+/**
+ * Faixas de borda que continuam pertencendo ao card quando os controles são nativos,
+ * para o resize sobreviver sem a camada de hover. Deve acompanhar `CORNER_THRESHOLD_PX`
+ * do `useDragResize`. A borda inferior fica de fora de propósito: é onde mora a barra
+ * de controles do YouTube.
+ */
+const NATIVE_CONTROLS_EDGE_BAND_PX = 14
 const DOCK_VISIBLE_SLICE_RATIO = 0.35
 const DOCK_VISIBLE_SLICE_MIN_PX = 52
 const DEFAULT_INITIAL_VOLUME = 20
@@ -58,6 +93,17 @@ const MOBILE_DOCK_BUBBLE_OFFSET_X_PX = 20
 const MOBILE_DOCK_BUBBLE_OFFSET_Y_PX = 0
 const MOBILE_DOCK_BUBBLE_BACKGROUND = 'rgba(0,0,0,0.35)'
 const MOBILE_DOCK_BUBBLE_ICON_SIZE_PX = 28
+
+/**
+ * Alça de arraste — barra encostada na borda inferior do card.
+ * Ajuste tamanho, cor e proporção da largura em relação ao card.
+ */
+const DRAG_HANDLE_HEIGHT_PX = 20
+const DRAG_HANDLE_BACKGROUND = '#2b2b2b'
+/** Compartilhado entre o vídeo e a alça, para o conjunto fechar sem degrau. */
+const CARD_BORDER_RADIUS_PX = 12
+const DRAG_HANDLE_ICON_COLOR = 'rgba(255,255,255,0.72)'
+const DRAG_HANDLE_ICON_SIZE_PX = 16
 /** Camada mobile “tela cheia” (acima da bolinha zIndex 10000). */
 const MOBILE_EXPAND_Z = 100005
 const MOBILE_EXPAND_CLOSE_Z = 100006
@@ -78,9 +124,34 @@ function DockBubbleIcon({ sizePx }: { sizePx: number }) {
   )
 }
 
+function DragHandleIcon({ sizePx }: { sizePx: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={sizePx}
+      height={sizePx}
+      fill="currentColor"
+      viewBox="0 0 16 16"
+      style={{ pointerEvents: 'none' }}
+    >
+      <circle cx="3" cy="6" r="1" />
+      <circle cx="8" cy="6" r="1" />
+      <circle cx="13" cy="6" r="1" />
+      <circle cx="3" cy="10" r="1" />
+      <circle cx="8" cy="10" r="1" />
+      <circle cx="13" cy="10" r="1" />
+    </svg>
+  )
+}
+
 function isDockModeViewport() {
   if (typeof window === 'undefined') return false
   return window.innerWidth < DOCK_ACTIVATION_MAX_WIDTH
+}
+
+/** Topo máximo do card considerando a alça de arraste renderizada abaixo dele. */
+function getMaxTop(height: number) {
+  return Math.max(0, window.innerHeight - height - DRAG_HANDLE_HEIGHT_PX)
 }
 
 function getInitialPosFromAnchor(
@@ -90,11 +161,11 @@ function getInitialPosFromAnchor(
   width: number,
   height: number,
 ): Pos {
-  const maxLeft = Math.max(0, window.innerWidth - width)
-  const maxTop = Math.max(0, window.innerHeight - height)
+  const maxLeft = Math.max(0, getViewportWidth() - width)
+  const maxTop = getMaxTop(height)
 
   const left = anchor.includes('right')
-    ? window.innerWidth - width - offsetX
+    ? getViewportWidth() - width - offsetX
     : offsetX
   const top = anchor.includes('bottom')
     ? window.innerHeight - height - offsetY
@@ -169,8 +240,10 @@ function buildYoutubeEmbedUrl(
     autoplay: boolean
     looping: boolean
     origin?: string
-    /** No mobile usamos controles nativos do player. */
+    /** No modo compacto e com controles nativos usamos os controles do player. */
     youtubeControls: boolean
+    /** Mantém a marca e o link "assistir no YouTube" visíveis. */
+    keepYoutubeBranding: boolean
   },
 ) {
   const params = new URLSearchParams()
@@ -182,9 +255,14 @@ function buildYoutubeEmbedUrl(
   }
 
   params.set('playsinline', '1')
-  params.set('modestbranding', '1')
-  params.set('rel', '0')
-  params.set('showinfo', '0')
+
+  // `modestbranding` foi descontinuado pelo YouTube e não esconde mais o logo; com
+  // controles nativos queremos justamente o caminho para o YouTube, então nem enviamos.
+  if (!options.keepYoutubeBranding) {
+    params.set('modestbranding', '1')
+    params.set('rel', '0')
+  }
+
   params.set('controls', options.youtubeControls ? '1' : '0')
   params.set('enablejsapi', '1')
   if (options.origin) params.set('origin', options.origin)
@@ -203,16 +281,28 @@ const YoutubeShortsWidget: any = ({
   mobileAnchor,
   mobileOffsetX,
   mobileOffsetY,
+  forceCompactMode,
+  liveMode,
+  nativeYoutubeControls,
+  aspectRatio,
 }: YoutubeShortsWidgetProps) => {
   const cardRef = useRef<HTMLDivElement | null>(null)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const mobileFullscreenShellRef = useRef<HTMLDivElement | null>(null)
 
+  // `liveMode` é só um atalho: as duas capacidades que ele agrupa também podem ser
+  // ligadas isoladamente, porque na prática elas são independentes.
+  const isWidescreen = liveMode || aspectRatio === 'widescreen'
+  const wantsNativeControls = liveMode || nativeYoutubeControls
+
+  const aspectRatioWH = isWidescreen ? WIDESCREEN_ASPECT_RATIO_W_H : ASPECT_RATIO_W_H
+  const defaultWidth = isWidescreen ? WIDESCREEN_DEFAULT_WIDTH : DEFAULT_WIDTH
+  const minWidth = isWidescreen ? WIDESCREEN_MIN_WIDTH : MIN_WIDTH
+  const maxWidth = isWidescreen ? WIDESCREEN_MAX_WIDTH : MAX_WIDTH
+
   const [size, setSize] = useState<{ width: number; height: number }>(() => ({
-    // width: 280,
-    // height: Math.round(280 / ASPECT_RATIO_W_H),
-    width: 200,
-    height: Math.round(200 / ASPECT_RATIO_W_H),
+    width: defaultWidth,
+    height: Math.round(defaultWidth / aspectRatioWH),
   }))
 
   const videoId = useMemo(() => extractYoutubeVideoId(shortsUrl), [shortsUrl])
@@ -223,10 +313,27 @@ const YoutubeShortsWidget: any = ({
   const [spaKey, setSpaKey] = useState(0)
   const [isHovering, setIsHovering] = useState(false)
   const [isVolumeHovering, setIsVolumeHovering] = useState(false)
-  const [isMobile, setIsMobile] = useState<boolean>(() => isMobileViewport())
-  const [isDockMode, setIsDockMode] = useState<boolean>(() => isDockModeViewport())
-  /** Mobile: vídeo em modo tela cheia (viewport), após toque na bolinha da doca. */
-  const [isMobileExpanded, setIsMobileExpanded] = useState(false)
+  // A viewport é medida separadamente do modo compacto: `forceCompactMode` liga o
+  // mesmo comportamento em telas largas, sem que o código perca a noção de tela real.
+  const [narrowViewport, setNarrowViewport] = useState<boolean>(() => isNarrowViewport())
+  const [dockViewport, setDockViewport] = useState<boolean>(() => isDockModeViewport())
+
+  /** Vídeo oculto atrás do botão lateral, controles nativos e fluxo de tela cheia. */
+  const isCompact = forceCompactMode || narrowViewport
+  // O 16:9 sempre acopla: mesmo em telas largas o vídeo horizontal atrapalha a
+  // navegação se ficar permanentemente visível.
+  const isDockMode = forceCompactMode || isWidescreen || dockViewport
+
+  /**
+   * Com controles nativos (`controls=1`), o overlay próprio e a camada de hover não
+   * podem ser renderizados: eles roubariam os cliques destinados ao player.
+   */
+  const useNativeControls = isCompact || wantsNativeControls
+
+  /** Compacto: vídeo em modo tela cheia (viewport), após toque na bolinha da doca. */
+  const [isFullscreenOpen, setIsFullscreenOpen] = useState(false)
+  /** Tela cheia nativa do player (botão do próprio YouTube, no modo Live). */
+  const [isNativeFullscreen, setIsNativeFullscreen] = useState(false)
 
   // Posição do card (fixo com scroll).
   const [pos, setPos] = useState<Pos>({ left: 16, top: 16 })
@@ -251,7 +358,7 @@ const YoutubeShortsWidget: any = ({
   useEffect(() => {
     setIsClosed(false)
     setIsPlaying(false)
-    setIsMobileExpanded(false)
+    setIsFullscreenOpen(false)
   }, [shortsUrl, startOnLoad])
 
   // Recarrega quando a página do SPA trocar (mesmo que `shortsUrl` não mude).
@@ -268,7 +375,7 @@ const YoutubeShortsWidget: any = ({
       setSpaKey((k) => k + 1)
       setIsClosed(false)
       setIsPlaying(false)
-      setIsMobileExpanded(false)
+      setIsFullscreenOpen(false)
     }
 
     const onPopState = () => resetForRouteChange()
@@ -298,7 +405,7 @@ const YoutubeShortsWidget: any = ({
     }
   }, [])
 
-  const dockOffsetX = isMobile ? mobileOffsetX : desktopOffsetX
+  const dockOffsetX = isCompact ? mobileOffsetX : desktopOffsetX
 
   const {
     isDocked,
@@ -314,7 +421,7 @@ const YoutubeShortsWidget: any = ({
     setIsDockHovering,
   } = useDock({
     isDockMode,
-    isMobile,
+    isCompact,
     dockOffsetX,
     size,
     pos,
@@ -325,16 +432,18 @@ const YoutubeShortsWidget: any = ({
     const rect = cardRef.current.getBoundingClientRect()
     const width = rect.width || 280
     const height = rect.height || 480
-    const mobile = isMobileViewport()
-    const dockModeNow = isDockModeViewport()
-    const anchor = mobile ? mobileAnchor : desktopAnchor
-    const offsetX = mobile ? mobileOffsetX : desktopOffsetX
-    const offsetY = mobile ? mobileOffsetY : desktopOffsetY
+    // Precisa reler a viewport aqui: este callback roda na fase de layout, antes de
+    // um eventual `setState` do listener de resize ser refletido.
+    const compactNow = forceCompactMode || isNarrowViewport()
+    const dockModeNow = forceCompactMode || isWidescreen || isDockModeViewport()
+    const anchor = compactNow ? mobileAnchor : desktopAnchor
+    const offsetX = compactNow ? mobileOffsetX : desktopOffsetX
+    const offsetY = compactNow ? mobileOffsetY : desktopOffsetY
     if (dockModeNow) {
       // Lado direito da tela, centralizado verticalmente
-      const left = window.innerWidth - width - offsetX
+      const left = getViewportWidth() - width - offsetX
       const top = (window.innerHeight - height) / 2
-      setPos({ left: clamp(left, 0, window.innerWidth - width), top: clamp(top, 0, window.innerHeight - height) })
+      setPos({ left: clamp(left, 0, getViewportWidth() - width), top: clamp(top, 0, getMaxTop(height)) })
       applyDockMode(true)
     } else {
       setPos(getInitialPosFromAnchor(anchor, offsetX, offsetY, width, height))
@@ -345,6 +454,8 @@ const YoutubeShortsWidget: any = ({
     desktopAnchor,
     desktopOffsetX,
     desktopOffsetY,
+    forceCompactMode,
+    isWidescreen,
     mobileAnchor,
     mobileOffsetX,
     mobileOffsetY,
@@ -379,25 +490,24 @@ const YoutubeShortsWidget: any = ({
   // Re-clamp em resize.
   useEffect(() => {
     const onResize = () => {
-      const mobileNow = isMobileViewport()
-      const dockModeNow = isDockModeViewport()
-      setIsMobile(mobileNow)
-      setIsDockMode(dockModeNow)
+      const narrowNow = isNarrowViewport()
+      const dockModeNow = forceCompactMode || isWidescreen || isDockModeViewport()
+      setNarrowViewport(narrowNow)
+      setDockViewport(isDockModeViewport())
       if (!dockModeNow) {
         setIsDocked(false)
         setIsDockHovering(false)
       }
-      if (mobileNow) {
-        const safeWidth = Math.max(140, Math.min(MOBILE_FIXED_WIDTH, window.innerWidth - 24))
-        const nextHeight = Math.round(safeWidth / ASPECT_RATIO_W_H)
-        setSize({ width: safeWidth, height: nextHeight })
+      if (forceCompactMode || narrowNow) {
+        const safeWidth = Math.max(140, Math.min(COMPACT_FIXED_WIDTH, getViewportWidth() - 24))
+        setSize({ width: safeWidth, height: Math.round(safeWidth / aspectRatioWH) })
       }
       if (!cardRef.current) return
       const rect = cardRef.current.getBoundingClientRect()
       const width = rect.width || 280
       const height = rect.height || 480
-      const maxLeft = Math.max(0, window.innerWidth - width)
-      const maxTop = Math.max(0, window.innerHeight - height)
+      const maxLeft = Math.max(0, getViewportWidth() - width)
+      const maxTop = getMaxTop(height)
       setPos((p) => ({
         left: clamp(p.left, 0, maxLeft),
         top: clamp(p.top, 0, maxTop),
@@ -405,25 +515,27 @@ const YoutubeShortsWidget: any = ({
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [])
+  }, [aspectRatioWH, forceCompactMode, isWidescreen, setIsDocked, setIsDockHovering])
 
+  // O modo compacto tem largura fixa; ao sair dele o card volta ao tamanho padrão,
+  // senão ficaria preso na largura reduzida.
   useEffect(() => {
-    if (!isMobile) return
-    const safeWidth = Math.max(140, Math.min(MOBILE_FIXED_WIDTH, window.innerWidth - 24))
-    const nextHeight = Math.round(safeWidth / ASPECT_RATIO_W_H)
-    setSize({ width: safeWidth, height: nextHeight })
-  }, [isMobile])
+    const width = isCompact
+      ? Math.max(140, Math.min(COMPACT_FIXED_WIDTH, getViewportWidth() - 24))
+      : defaultWidth
+    setSize({ width, height: Math.round(width / aspectRatioWH) })
+  }, [aspectRatioWH, defaultWidth, isCompact])
 
   // A dock “fecha” o card quando estiver acoplado.
-  // - mobile: esconde tudo (mantém apenas a bolinha cinza)
+  // - compacto: esconde tudo (mantém apenas a bolinha cinza)
   // - desktop: mostra só um sliver até passar o mouse na alça
   const dockCardHiddenForUI =
-    isDockMode && isDocked && (isMobile ? true : !isDockHovering)
+    isDockMode && isDocked && (isCompact ? true : !isDockHovering)
 
   // Observação: não reposicionamos o widget para o dock quando ele esconde.
   // Assim, após arrastar e soltar, “tirar o mouse” não força snap de volta.
 
-  // Bolinha mobile: encostada na borda direita do card (doca), centralizada na vertical.
+  // Bolinha do modo compacto: encostada na borda direita da tela, centralizada na vertical.
   const mobileDockBubbleSize = Math.max(44, Math.min(MOBILE_DOCK_BUBBLE_SIZE_PX, size.height))
   const mobileDockBubbleLeft =
     dockPos.left + (size.width - mobileDockBubbleSize) + MOBILE_DOCK_BUBBLE_OFFSET_X_PX
@@ -441,9 +553,12 @@ const YoutubeShortsWidget: any = ({
       autoplay,
       looping,
       origin,
-      youtubeControls: isMobile,
+      youtubeControls: useNativeControls,
+      // Só quando os controles nativos foram pedidos por prop: no modo compacto o
+      // comportamento de sempre (sem vídeos relacionados) é mantido.
+      keepYoutubeBranding: wantsNativeControls,
     })
-  }, [videoId, autoplay, looping, isMobile])
+  }, [videoId, autoplay, looping, useNativeControls, wantsNativeControls])
 
   const onClose = useCallback(() => {
     setIsClosed(true)
@@ -474,7 +589,7 @@ const YoutubeShortsWidget: any = ({
     startOnLoad,
     isPlaying,
     isHovering,
-    isMobile,
+    isCompact,
     showMobileControls,
   })
 
@@ -504,7 +619,7 @@ const YoutubeShortsWidget: any = ({
     setPosThrottled,
     size,
     setSize,
-    isMobile,
+    isCompact,
     isDockMode,
     isVideoPlaying,
     dockPosRef,
@@ -512,7 +627,12 @@ const YoutubeShortsWidget: any = ({
     setIsDocked,
     setIsDockHovering,
     setPos,
-    onTapToggle: isMobile ? undefined : togglePlayPause,
+    // Com controles nativos o toque não deve pausar por fora do player.
+    onTapToggle: useNativeControls ? undefined : togglePlayPause,
+    bottomReservedPx: DRAG_HANDLE_HEIGHT_PX,
+    aspectRatioWH,
+    minWidth,
+    maxWidth,
   })
 
   const exitMobileExpandedToDocked = useCallback(() => {
@@ -523,13 +643,13 @@ const YoutubeShortsWidget: any = ({
     } catch {
       // noop
     }
-    setIsMobileExpanded(false)
+    setIsFullscreenOpen(false)
     setIsDocked(true)
     pauseVideo()
   }, [pauseVideo, setIsDocked])
 
   useLayoutEffect(() => {
-    if (!isMobile || !isMobileExpanded) return
+    if (!isCompact || !isFullscreenOpen) return
     const el = mobileFullscreenShellRef.current as any
     if (!el) return
     const doc = document as any
@@ -544,36 +664,56 @@ const YoutubeShortsWidget: any = ({
     }
     tryEnter()
     requestAnimationFrame(tryEnter)
-  }, [isMobile, isMobileExpanded])
+  }, [isCompact, isFullscreenOpen])
 
   useEffect(() => {
-    if (isMobile && isDocked) setIsMobileExpanded(false)
-  }, [isMobile, isDocked])
+    if (isCompact && isDocked) setIsFullscreenOpen(false)
+  }, [isCompact, isDocked])
 
   useEffect(() => {
-    if (!isMobile || !isDockMode || !isDocked || !playerReady) return
+    if (!isCompact || !isDockMode || !isDocked || !playerReady) return
     pauseVideo()
-  }, [isMobile, isDockMode, isDocked, playerReady, pauseVideo])
+  }, [isCompact, isDockMode, isDocked, playerReady, pauseVideo])
 
   useEffect(() => {
-    if (!isMobile || !isMobileExpanded) return
+    if (!isCompact || !isFullscreenOpen) return
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
       document.body.style.overflow = prev
     }
-  }, [isMobile, isMobileExpanded])
+  }, [isCompact, isFullscreenOpen])
 
   useEffect(() => {
-    if (!isMobile || !isMobileExpanded || !playerReady) return
+    if (!isCompact || !isFullscreenOpen || !playerReady) return
     playVideo()
-  }, [isMobile, isMobileExpanded, playerReady, playVideo])
+  }, [isCompact, isFullscreenOpen, playerReady, playVideo])
+
+  // O fullscreen do player é solicitado pelo iframe, então quem recebe o evento é o
+  // documento pai. Acompanhar isso permite manter o card sem `transform` enquanto a
+  // tela cheia estiver ativa (um ancestral transformado quebra o posicionamento).
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+
+    const onFullscreenChange = () => {
+      const doc = document as any
+      setIsNativeFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement))
+    }
+
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+    }
+  }, [])
 
   const progressPercent = progress.duration
     ? clamp(progress.currentTime / progress.duration, 0, 1) * 100
     : 0
-  const dockCardHiddenMobile = isDockMode && isMobile && isDocked
-  const dockCardHiddenDesktop = !isMobile && isDockMode && isDocked && !isDockHovering
+  const dockCardHiddenMobile = isDockMode && isCompact && isDocked
+  const dockCardHiddenDesktop =
+    !isCompact && isDockMode && isDocked && !isDockHovering && !isNativeFullscreen
   const layoutCardHidden = !layoutCardReady
   const dockVisibleSliceWidth = Math.max(
     DOCK_VISIBLE_SLICE_MIN_PX,
@@ -583,12 +723,17 @@ const YoutubeShortsWidget: any = ({
     ? Math.max(0, size.width - dockVisibleSliceWidth)
     : 0
 
+  const showDragHandle =
+    !layoutCardHidden &&
+    !dockCardHiddenMobile &&
+    !dockCardHiddenDesktop &&
+    !(isCompact && isFullscreenOpen)
+
   // Quando a doca está “fechada”, evita mostrar overlays (header/controls).
-  // No mobile os controles são nativos do YouTube (`controls=1` no embed).
   const shouldShowControls =
     shouldMountIframe &&
     !dockCardHiddenForUI &&
-    !isMobile &&
+    !useNativeControls &&
     (isHovering || !isVideoPlaying)
 
   if (!videoId) return null
@@ -605,7 +750,7 @@ const YoutubeShortsWidget: any = ({
         .ytw-btn-volume:not(:disabled):hover { color: #FFDA00; }
       `}</style>
       {/* Desktop: alça transparente para revelar o widget quando estiver acoplado */}
-      {isDockMode && !isMobile && isDocked ? (
+      {isDockMode && !isCompact && isDocked ? (
         <div
           data-no-drag="true"
           aria-hidden="true"
@@ -632,14 +777,14 @@ const YoutubeShortsWidget: any = ({
       ) : null}
 
       {/* Dock: mobile mostra bolinha cinza. Acima de 1024 revela sliver (desktop). */}
-      {isDockMode && isMobile && isDocked ? (
+      {isDockMode && isCompact && isDocked ? (
         <div
           data-no-drag="true"
           role="button"
           aria-label="Abrir em tela cheia"
           onClick={() => {
             setIsDocked(false)
-            setIsMobileExpanded(true)
+            setIsFullscreenOpen(true)
           }}
           style={{
             position: 'fixed',
@@ -693,7 +838,7 @@ const YoutubeShortsWidget: any = ({
           overflow: 'visible',
           background: 'transparent',
           touchAction: 'none',
-          cursor: isMobile ? 'grab' : resizeCursor || 'grab',
+          cursor: isCompact ? 'grab' : resizeCursor || 'grab',
           transform:
             dockHiddenTranslateXPx > 0
               ? `translateX(${dockHiddenTranslateXPx}px)`
@@ -703,7 +848,7 @@ const YoutubeShortsWidget: any = ({
           pointerEvents:
             layoutCardHidden || dockCardHiddenMobile || dockCardHiddenDesktop
               ? 'none'
-              : isMobile && isMobileExpanded
+              : isCompact && isFullscreenOpen
                 ? 'none'
                 : 'auto',
           transition: 'transform .2s ease-in-out, opacity .2s ease-in-out',
@@ -729,7 +874,7 @@ const YoutubeShortsWidget: any = ({
         onPointerMove={onPointerMoveCard}
         onPointerUp={onPointerUpCard}
       >
-        {closable && !(isMobile && isMobileExpanded) ? (
+        {closable && !(isCompact && isFullscreenOpen) ? (
           <button
             type="button"
             data-no-drag="true"
@@ -772,16 +917,23 @@ const YoutubeShortsWidget: any = ({
           style={{
             width: '100%',
             height: '100%',
-            borderRadius: isMobile && isMobileExpanded ? 0 : 12,
+            // Com a alça encostada embaixo, os cantos inferiores deixariam uma falha
+            // visível entre o vídeo e a barra; os de cima continuam arredondados.
+            borderRadius:
+              isCompact && isFullscreenOpen
+                ? 0
+                : showDragHandle
+                  ? `${CARD_BORDER_RADIUS_PX}px ${CARD_BORDER_RADIUS_PX}px 0 0`
+                  : CARD_BORDER_RADIUS_PX,
             overflow: 'hidden',
-            position: isMobile && isMobileExpanded ? 'fixed' : 'relative',
+            position: isCompact && isFullscreenOpen ? 'fixed' : 'relative',
             background: '#000',
             // Com o card em `pointer-events: none` no mobile expandido, o hit-test ignora
             // o card inteiro a menos que este shell reabilite toques (MDN: filhos precisam
             // de `pointer-events: auto` explícito).
-            pointerEvents: isMobile && isMobileExpanded ? 'auto' : undefined,
-            isolation: isMobile && isMobileExpanded ? 'isolate' : undefined,
-            ...(isMobile && isMobileExpanded
+            pointerEvents: isCompact && isFullscreenOpen ? 'auto' : undefined,
+            isolation: isCompact && isFullscreenOpen ? 'isolate' : undefined,
+            ...(isCompact && isFullscreenOpen
               ? {
                 top: 0,
                 left: 0,
@@ -795,7 +947,7 @@ const YoutubeShortsWidget: any = ({
               : {}),
           }}
         >
-          {isMobile && isMobileExpanded ? (
+          {isCompact && isFullscreenOpen ? (
             <button
               type="button"
               data-no-drag="true"
@@ -886,8 +1038,9 @@ const YoutubeShortsWidget: any = ({
             </button>
           )}
 
-          {/* Desktop: camada que captura hover; no mobile o toque vai ao iframe (controles nativos). */}
-          {shouldMountIframe && !isMobile ? (
+          {/* Camada que captura hover. Com controles nativos ela precisa sair do
+              caminho, senão bloqueia os cliques que deveriam chegar ao player. */}
+          {shouldMountIframe && !useNativeControls ? (
             <div
               aria-hidden="true"
               style={{
@@ -899,7 +1052,32 @@ const YoutubeShortsWidget: any = ({
             />
           ) : null}
 
-          {shouldMountIframe && !isMobile ? (
+          {/* Controles nativos: devolve apenas as bordas ao card, para o resize
+              continuar funcionando enquanto o centro segue clicável no player. */}
+          {shouldMountIframe && useNativeControls && !isCompact ? (
+            <div
+              aria-hidden="true"
+              style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}
+            >
+              {(['top', 'left', 'right'] as const).map((side) => (
+                <div
+                  key={side}
+                  style={{
+                    position: 'absolute',
+                    pointerEvents: 'auto',
+                    top: 0,
+                    bottom: side === 'top' ? undefined : 0,
+                    left: side === 'right' ? undefined : 0,
+                    right: side === 'left' ? undefined : 0,
+                    width: side === 'top' ? undefined : NATIVE_CONTROLS_EDGE_BAND_PX,
+                    height: side === 'top' ? NATIVE_CONTROLS_EDGE_BAND_PX : undefined,
+                  }}
+                />
+              ))}
+            </div>
+          ) : null}
+
+          {shouldMountIframe && !useNativeControls ? (
             <div
               style={{
                 position: 'absolute',
@@ -1092,6 +1270,37 @@ const YoutubeShortsWidget: any = ({
           ) : null}
         </div>
 
+        {/* Alça de arraste: vive fora do box do card (`top: 100%`), por isso o
+            card precisa de `overflow: visible`. */}
+        {showDragHandle ? (
+          <div
+            data-ytw-drag-handle="true"
+            aria-hidden="true"
+            title="Arraste para mover"
+            style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              // Acompanha a largura do card, inclusive durante o resize.
+              width: '100%',
+              height: DRAG_HANDLE_HEIGHT_PX,
+              zIndex: 4,
+              borderRadius: `0 0 ${CARD_BORDER_RADIUS_PX}px ${CARD_BORDER_RADIUS_PX}px`,
+              background: DRAG_HANDLE_BACKGROUND,
+              color: DRAG_HANDLE_ICON_COLOR,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'grab',
+              touchAction: 'none',
+              userSelect: 'none',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.35)',
+            }}
+          >
+            <DragHandleIcon sizePx={DRAG_HANDLE_ICON_SIZE_PX} />
+          </div>
+        ) : null}
+
         {/* Resize é por bordas/cantos (sem handle visual). */}
       </div>
     </>
@@ -1106,8 +1315,9 @@ YoutubeShortsWidget.schema = {
   properties: {
     shortsUrl: {
       type: 'string',
-      title: 'Link do Shorts do YouTube',
-      description: 'Cole a URL do vídeo (Shorts ou watch?v=).',
+      title: 'Link do YouTube',
+      description:
+        'Cole a URL do vídeo no padrão: https://www.youtube.com/embed/{id-do-video-aqui}',
       default: '',
     },
     startOnLoad: {
@@ -1129,6 +1339,37 @@ YoutubeShortsWidget.schema = {
       description: 'Se ativado, ao terminar o vídeo ele recomeça automaticamente.',
       default: true,
     },
+    forceCompactMode: {
+      type: 'boolean',
+      title: 'Forçar modo compacto (estilo mobile) em qualquer tela',
+      description:
+        'Se ativado, o vídeo fica oculto e só é aberto pelo botão fixo na lateral direita, ' +
+        'como já acontece em telas estreitas.',
+      default: false,
+    },
+    liveMode: {
+      type: 'boolean',
+      title: 'Modo Live',
+      description:
+        'Atalho: liga de uma vez os controles nativos do YouTube e a proporção 16:9. ' +
+        'Para controlar cada parte separadamente, use as duas opções abaixo.',
+      default: false,
+    },
+    nativeYoutubeControls: {
+      type: 'boolean',
+      title: 'Modo YouTube (controles nativos)',
+      description:
+        'Substitui a camada própria de arraste e controles pelos comandos nativos do ' +
+        'YouTube (tela cheia, abrir no YouTube). O card continua sendo movido pela alça.',
+      default: false,
+    },
+    aspectRatio: {
+      type: 'string',
+      title: 'Proporção do vídeo',
+      enum: ['vertical', 'widescreen'],
+      enumNames: ['Vertical (Shorts/Reels 9:16)', 'Horizontal (16:9)'],
+      default: 'vertical',
+    },
   },
 }
 
@@ -1145,6 +1386,10 @@ YoutubeShortsWidget.defaultProps = {
   mobileAnchor: 'bottom-right',
   mobileOffsetX: 12,
   mobileOffsetY: 12,
+  forceCompactMode: false,
+  liveMode: false,
+  nativeYoutubeControls: false,
+  aspectRatio: 'vertical',
 }
 
 export default YoutubeShortsWidget
