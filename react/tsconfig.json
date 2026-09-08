@@ -7,6 +7,5 @@
     "moduleResolution": "node",
     "target": "es2017"
   },
-  "include": ["./typings/*.d.ts", "./**/*.tsx", "./**/*.ts"],
-  "exclude": ["./components/**"]
+  "include": ["./**/*.tsx", "./**/*.ts"]
 }

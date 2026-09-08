@@ -3,7 +3,6 @@
 /.git/
 /package.json
 /README.md
-/crowdin.yml
 
 # tools
 **/.eslintrc
