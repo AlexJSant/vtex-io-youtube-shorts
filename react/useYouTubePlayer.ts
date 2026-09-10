@@ -51,7 +51,15 @@ function clamp(n: number, min: number, max: number) {
 
 function useYouTubePlayer(options: {
   shouldMountIframe: boolean
-  iframeRef: React.RefObject<HTMLIFrameElement>
+  /**
+   * Container controlado pelo React. O `<iframe>` é criado imperativamente dentro
+   * dele porque `YT.Player#destroy()` remove o próprio nó do DOM: se o React fosse
+   * o dono do iframe, a remoção seguinte feita pelo React falharia com
+   * `NotFoundError: Failed to execute 'removeChild' on 'Node'`, quebrando a árvore
+   * de componentes da página inteira.
+   */
+  hostRef: React.RefObject<HTMLDivElement>
+  embedUrl: string | null
   videoId: string | null
   spaKey: number
   looping: boolean
@@ -75,7 +83,8 @@ function useYouTubePlayer(options: {
 } {
   const {
     shouldMountIframe,
-    iframeRef,
+    hostRef,
+    embedUrl,
     videoId,
     spaKey,
     looping,
@@ -98,28 +107,54 @@ function useYouTubePlayer(options: {
   const [videoMeta, setVideoMeta] = useState<VideoMeta>({ title: '', author: '' })
   const isPlayingRef = useRef(isPlaying)
   const startOnLoadRef = useRef(startOnLoad)
+  const isUnmountedRef = useRef(false)
 
   isPlayingRef.current = isPlaying
   startOnLoadRef.current = startOnLoad
 
-  // Inicializa o player do YouTube via IFrame API.
+  // Declarado antes do efeito do player: no unmount o React roda os cleanups na
+  // ordem de declaração dos hooks, então a flag já está ligada quando o player limpa.
+  useEffect(
+    () => () => {
+      isUnmountedRef.current = true
+    },
+    [],
+  )
+
+  // Cria o iframe e inicializa o player do YouTube via IFrame API.
   useEffect(() => {
     if (!shouldMountIframe) return
-    if (!iframeRef.current) return
+    if (!embedUrl) return
+
+    const host = hostRef.current
+    if (!host) return
 
     let cancelled = false
-    const iframe = iframeRef.current
+
+    const iframe = document.createElement('iframe')
+    iframe.title = 'YouTube Shorts'
+    iframe.id = `ytw-${videoId}-${spaKey}`
+    iframe.src = embedUrl
+    iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'
+    iframe.setAttribute('allowfullscreen', 'true')
+    iframe.setAttribute('loading', startOnLoadRef.current ? 'eager' : 'lazy')
+    iframe.setAttribute('frameborder', '0')
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin'
+    iframe.style.position = 'absolute'
+    iframe.style.zIndex = '0'
+    iframe.style.top = '0'
+    iframe.style.left = '0'
+    iframe.style.width = '100%'
+    iframe.style.height = '100%'
+    iframe.style.border = '0'
+
+    host.appendChild(iframe)
 
     loadYouTubeIframeAPI().then(() => {
       if (cancelled) return
-      if (!iframeRef.current) return
       if (!window.YT?.Player) return
-
-      try {
-        playerRef.current?.destroy?.()
-      } catch {
-        // noop
-      }
+      // O iframe pode ter sido descartado enquanto a API carregava.
+      if (!iframe.parentNode) return
 
       const player = new window.YT.Player(iframe, {
         events: {
@@ -150,6 +185,7 @@ function useYouTubePlayer(options: {
             }
           },
           onStateChange: (evt: any) => {
+            if (cancelled) return
             const state = evt?.data
             setIsVideoPlaying(state === 1)
 
@@ -171,21 +207,34 @@ function useYouTubePlayer(options: {
 
     return () => {
       cancelled = true
-      setPlayerReady(false)
-      setIsVideoPlaying(false)
-      setProgress({ currentTime: 0, duration: 0 })
-      setVideoMeta({ title: '', author: '' })
+
+      if (!isUnmountedRef.current) {
+        setPlayerReady(false)
+        setIsVideoPlaying(false)
+        setProgress({ currentTime: 0, duration: 0 })
+        setVideoMeta({ title: '', author: '' })
+      }
 
       try {
+        // `destroy()` remove o nó do DOM por conta própria; por isso ele nunca
+        // pode ser um nó renderizado pelo React.
         playerRef.current?.destroy?.()
       } catch {
         // noop
       }
       playerRef.current = null
+
+      // Limpa o que sobrou (o iframe original ou o nó substituto criado pela API
+      // do YouTube), sempre conferindo o pai real antes de remover.
+      try {
+        if (iframe.parentNode === host) host.removeChild(iframe)
+        while (host.firstChild) host.removeChild(host.firstChild)
+      } catch {
+        // noop
+      }
     }
     // Dependências: recria quando o iframe é forçado por `spaKey`/troca de vídeo.
-    // }, [shouldMountIframe, iframeRef, videoId, spaKey, looping])
-  }, [shouldMountIframe, videoId, spaKey, looping, initialVolume])
+  }, [shouldMountIframe, hostRef, embedUrl, videoId, spaKey, looping, initialVolume])
 
   // Atualiza progresso/volume enquanto o usuário está no hover.
   useEffect(() => {

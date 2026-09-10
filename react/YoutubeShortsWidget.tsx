@@ -1,8 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import useDock from './useDock'
 import useDragResize from './useDragResize'
+import useRouteChange from './useRouteChange'
 import useYouTubePlayer from './useYouTubePlayer'
 import { getViewportWidth } from './viewport'
+
+/** No SSR não existe `window`, e `useLayoutEffect` só emitiria warning. */
+const useIsomorphicLayoutEffect =
+  typeof window !== 'undefined' ? useLayoutEffect : useEffect
 
 type YoutubeShortsWidgetProps = {
   /**
@@ -287,7 +292,8 @@ const YoutubeShortsWidget: any = ({
   aspectRatio,
 }: YoutubeShortsWidgetProps) => {
   const cardRef = useRef<HTMLDivElement | null>(null)
-  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  /** Container do iframe. Quem cria/destrói o iframe é `useYouTubePlayer`. */
+  const playerHostRef = useRef<HTMLDivElement | null>(null)
   const mobileFullscreenShellRef = useRef<HTMLDivElement | null>(null)
 
   // `liveMode` é só um atalho: as duas capacidades que ele agrupa também podem ser
@@ -315,8 +321,20 @@ const YoutubeShortsWidget: any = ({
   const [isVolumeHovering, setIsVolumeHovering] = useState(false)
   // A viewport é medida separadamente do modo compacto: `forceCompactMode` liga o
   // mesmo comportamento em telas largas, sem que o código perca a noção de tela real.
-  const [narrowViewport, setNarrowViewport] = useState<boolean>(() => isNarrowViewport())
-  const [dockViewport, setDockViewport] = useState<boolean>(() => isDockModeViewport())
+  //
+  // Nada aqui pode ser inicializado a partir de `window`: o HTML do SSR sairia
+  // sempre com o layout desktop e a hidratação no cliente encontraria uma árvore
+  // diferente, corrompendo os nós vizinhos da página. A viewport só é medida
+  // depois da montagem, e até lá o componente não renderiza nada.
+  const [isMounted, setIsMounted] = useState(false)
+  const [narrowViewport, setNarrowViewport] = useState(false)
+  const [dockViewport, setDockViewport] = useState(false)
+
+  useEffect(() => {
+    setNarrowViewport(isNarrowViewport())
+    setDockViewport(isDockModeViewport())
+    setIsMounted(true)
+  }, [])
 
   /** Vídeo oculto atrás do botão lateral, controles nativos e fluxo de tela cheia. */
   const isCompact = forceCompactMode || narrowViewport
@@ -362,48 +380,12 @@ const YoutubeShortsWidget: any = ({
   }, [shortsUrl, startOnLoad])
 
   // Recarrega quando a página do SPA trocar (mesmo que `shortsUrl` não mude).
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-
-    let lastHref = window.location.href
-
-    const resetForRouteChange = () => {
-      const nextHref = window.location.href
-      if (nextHref === lastHref) return
-      lastHref = nextHref
-
-      setSpaKey((k) => k + 1)
-      setIsClosed(false)
-      setIsPlaying(false)
-      setIsFullscreenOpen(false)
-    }
-
-    const onPopState = () => resetForRouteChange()
-    window.addEventListener('popstate', onPopState)
-
-    const originalPushState = history.pushState
-    const originalReplaceState = history.replaceState
-
-    // Monkey patch simples para capturar mudanças de rota.
-    // (Usamos arrow function para evitar erro de TS sobre `this` implícito.)
-    history.pushState = ((...args: any[]) => {
-      const ret = originalPushState.apply(history, args as any)
-      resetForRouteChange()
-      return ret
-    }) as any
-
-    history.replaceState = ((...args: any[]) => {
-      const ret = originalReplaceState.apply(history, args as any)
-      resetForRouteChange()
-      return ret
-    }) as any
-
-    return () => {
-      window.removeEventListener('popstate', onPopState)
-      history.pushState = originalPushState
-      history.replaceState = originalReplaceState
-    }
-  }, [])
+  useRouteChange(() => {
+    setSpaKey((k) => k + 1)
+    setIsClosed(false)
+    setIsPlaying(false)
+    setIsFullscreenOpen(false)
+  })
 
   const dockOffsetX = isCompact ? mobileOffsetX : desktopOffsetX
 
@@ -462,8 +444,10 @@ const YoutubeShortsWidget: any = ({
   ])
 
   // Ajuste inicial para posição configurada (layout phase → antes do paint quando possível).
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (typeof window === 'undefined') return
+    // O card só existe a partir da primeira renderização pós-montagem.
+    if (!isMounted) return
 
     setLayoutCardReady(false)
 
@@ -485,7 +469,7 @@ const YoutubeShortsWidget: any = ({
     return () => {
       if (raf) window.cancelAnimationFrame(raf)
     }
-  }, [videoId, spaKey, applyInitialPosition])
+  }, [videoId, spaKey, isMounted, applyInitialPosition])
 
   // Re-clamp em resize.
   useEffect(() => {
@@ -581,7 +565,8 @@ const YoutubeShortsWidget: any = ({
     playVideo,
   } = useYouTubePlayer({
     shouldMountIframe,
-    iframeRef: iframeRef as React.RefObject<HTMLIFrameElement>,
+    hostRef: playerHostRef as React.RefObject<HTMLDivElement>,
+    embedUrl,
     videoId,
     spaKey,
     looping,
@@ -648,7 +633,7 @@ const YoutubeShortsWidget: any = ({
     pauseVideo()
   }, [pauseVideo, setIsDocked])
 
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (!isCompact || !isFullscreenOpen) return
     const el = mobileFullscreenShellRef.current as any
     if (!el) return
@@ -736,6 +721,9 @@ const YoutubeShortsWidget: any = ({
     !useNativeControls &&
     (isHovering || !isVideoPlaying)
 
+  // No servidor e na primeira renderização do cliente a saída é sempre a mesma
+  // (nada), então a hidratação nunca encontra uma árvore divergente.
+  if (!isMounted) return null
   if (!videoId) return null
   if (isClosed) return null
 
@@ -993,27 +981,23 @@ const YoutubeShortsWidget: any = ({
               </svg>
             </button>
           ) : null}
-          {shouldMountIframe && embedUrl ? (
-            <iframe
-              key={`${videoId}-${spaKey}`}
-              title="YouTube Shorts"
-              src={embedUrl}
-              ref={iframeRef}
-              id={`ytw-${videoId}-${spaKey}`}
-              style={{
-                position: 'absolute',
-                zIndex: 0,
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                border: 0,
-              }}
-              allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-              allowFullScreen
-              loading={startOnLoad ? 'eager' : 'lazy'}
-              referrerPolicy="strict-origin-when-cross-origin"
-            />
-          ) : (
+          {/* Host do player. Fica sempre montado, com o mesmo nó, para que o React
+              nunca precise remover algo que a API do YouTube já removeu por dentro. */}
+          <div
+            ref={playerHostRef}
+            aria-hidden={shouldMountIframe ? undefined : true}
+            style={{
+              position: 'absolute',
+              zIndex: 0,
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              pointerEvents: shouldMountIframe ? undefined : 'none',
+            }}
+          />
+
+          {!shouldMountIframe ? (
             <button
               type="button"
               onClick={onPlay}
@@ -1022,6 +1006,7 @@ const YoutubeShortsWidget: any = ({
               style={{
                 position: 'absolute',
                 inset: 0,
+                zIndex: 1,
                 border: 0,
                 cursor: 'pointer',
                 background:
@@ -1036,7 +1021,7 @@ const YoutubeShortsWidget: any = ({
             >
               Tocar para iniciar
             </button>
-          )}
+          ) : null}
 
           {/* Camada que captura hover. Com controles nativos ela precisa sair do
               caminho, senão bloqueia os cliques que deveriam chegar ao player. */}

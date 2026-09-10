@@ -10,6 +10,9 @@
  * valor — se divergirem, a geometria do widget se desalinha.
  */
 export function getViewportWidth() {
-  if (typeof document === 'undefined') return window.innerWidth
-  return document.documentElement?.clientWidth || window.innerWidth
+  if (typeof document !== 'undefined') {
+    return document.documentElement?.clientWidth || window.innerWidth
+  }
+  // No SSR não existe nem `document` nem `window`.
+  return typeof window !== 'undefined' ? window.innerWidth : 0
 }
