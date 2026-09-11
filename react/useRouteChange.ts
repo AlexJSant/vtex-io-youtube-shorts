@@ -5,7 +5,7 @@ type Listener = () => void
 const listeners = new Set<Listener>()
 
 let installed = false
-let lastHref = ''
+let lastPath = ''
 
 /**
  * Notifica os assinantes de forma assincrona.
@@ -15,13 +15,17 @@ let lastHref = ''
  * render de outro componente ("Cannot update a component while rendering a
  * different component") e pode corromper a árvore. O microtask garante que a
  * atualização aconteça depois do commit em andamento.
+ *
+ * A comparação é só de `pathname`: o runtime reescreve query string e hash da
+ * própria URL durante o boot e a navegação, e tratar isso como troca de página
+ * recriava o player recém-criado, deixando o vídeo preto.
  */
 function notify() {
   if (typeof window === 'undefined') return
 
-  const nextHref = window.location.href
-  if (nextHref === lastHref) return
-  lastHref = nextHref
+  const nextPath = window.location.pathname
+  if (nextPath === lastPath) return
+  lastPath = nextPath
 
   Promise.resolve().then(() => {
     listeners.forEach((listener) => {
@@ -46,7 +50,7 @@ function installOnce() {
   if (typeof window === 'undefined') return
   installed = true
 
-  lastHref = window.location.href
+  lastPath = window.location.pathname
 
   window.addEventListener('popstate', notify)
   window.addEventListener('hashchange', notify)
@@ -67,12 +71,19 @@ function installOnce() {
   } as typeof window.history.replaceState
 }
 
-/** Executa `onRouteChange` quando a URL muda numa navegação SPA. */
-function useRouteChange(onRouteChange: () => void) {
+/**
+ * Executa `onRouteChange` quando a rota muda numa navegação SPA.
+ *
+ * `enabled` existe para adiar a instalação até a página estar carregada: durante
+ * o boot o runtime reescreve a própria URL, e nada disso é navegação de verdade.
+ */
+function useRouteChange(onRouteChange: () => void, enabled = true) {
   const handlerRef = useRef(onRouteChange)
   handlerRef.current = onRouteChange
 
   useEffect(() => {
+    if (!enabled) return
+
     installOnce()
 
     const listener = () => handlerRef.current()
@@ -81,7 +92,7 @@ function useRouteChange(onRouteChange: () => void) {
     return () => {
       listeners.delete(listener)
     }
-  }, [])
+  }, [enabled])
 }
 
 export default useRouteChange

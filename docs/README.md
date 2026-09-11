@@ -4,6 +4,8 @@ Floating widget that renders a YouTube embed (Shorts or video) on the storefront
 
 Current behavior (updated):
 
+- Mounts only after the page `load` event, so the widget never competes with the
+  storefront's main content (see *Mount lifecycle* below).
 - Draggable by any non-interactive area of the card, plus a dedicated drag handle bar
   attached under the card (see *Drag handle* below).
 - Resizable from borders/corners on desktop, preserving the configured aspect ratio.
@@ -44,6 +46,25 @@ without it, the card could not be moved in those modes.
 - Hidden while the widget is docked and while in compact fullscreen.
 - While it is visible, the video keeps only its top corners rounded, so the handle
   closes the assembly without a visible seam.
+
+### Mount lifecycle
+
+The widget renders `null` until the page finishes loading, then measures the viewport
+and mounts. Three constraints shaped this:
+
+- **Performance.** The dominant cost of this app is the YouTube iframe plus the
+  `iframe_api` script. Holding the mount back keeps both out of the critical path.
+- **Hydration.** Viewport-dependent state cannot be initialized from `window`, or the
+  SSR markup (always desktop) and the client render diverge. React then discards and
+  re-renders the subtree, and in production builds the mismatch corrupts sibling nodes.
+  Rendering `null` on the server and on the first client render keeps both identical.
+- **DOM ownership.** The `<iframe>` is created imperatively by `useYouTubePlayer`
+  inside a React-owned `<div>` host, because `YT.Player#destroy()` removes its own node
+  from the DOM. If React owned that node, its own later removal would throw
+  `NotFoundError: removeChild` and unmount the whole page tree.
+
+In SPA navigation the `load` event does not fire again, but `readyState` stays
+`complete`, so a later remount releases immediately.
 
 ![Media Placeholder](https://user-images.githubusercontent.com/52087100/71204177-42ca4f80-227e-11ea-89e6-e92e65370c69.png)
 
@@ -128,8 +149,14 @@ Example (`blocks.json` / `blocks.jsonc`) snippet:
 - The widget only renders when `shortsUrl` contains a valid YouTube video URL/ID.
 - Supported formats: direct ID, `youtu.be/<id>`, `youtube.com/shorts/<id>`, `youtube.com/watch?v=<id>`, `youtube.com/embed/<id>`.
 - Looping uses YouTube embed loop params and a fallback replay when the player reaches the `ended` state.
-- Playback state is reset when the store SPA URL changes.
+- Playback state is reset when the store SPA URL changes. Route changes are detected by
+  `pathname` only: the runtime rewrites its own query string and hash, which is not
+  navigation.
 - Widget position is recalculated from the configured anchor/offsets on full reload and SPA route changes.
+- The `history` patch that detects SPA navigation (`react/useRouteChange.ts`) is
+  installed once per page, shared by every instance, and only after page load. It is
+  never reverted: reverting per instance restored a stale `history.pushState` on
+  remount and broke storefront navigation.
 - Compact mode is considered when viewport width is lower than `1024px`, or whenever `forceCompactMode` is enabled.
 - Dock mode is considered when viewport width is lower than `DOCK_ACTIVATION_MAX_WIDTH` (currently `1620` in `react/YoutubeShortsWidget.tsx`), and is always active for `aspectRatio: 'widescreen'` and for `forceCompactMode`.
 - Horizontal geometry uses `getViewportWidth()` (`react/viewport.ts`) instead of `window.innerWidth`, because the latter includes the desktop scrollbar and pushes right-anchored fixed elements under it.
@@ -185,6 +212,16 @@ Later iteration (superseding parts of the list above):
   rendered.
 - Aspect ratio and width limits became configurable (9:16 and 16:9).
 - Fixed the drag start delay and the right-edge offset caused by the desktop scrollbar.
+
+Stability iteration (see *Mount lifecycle* above):
+
+- Fixed a crash that unmounted the entire page tree, caused by React and the YouTube
+  IFrame API both owning the `<iframe>` node.
+- Fixed the SSR/client hydration mismatch.
+- Replaced the per-instance `history` monkey patch with a single shared install.
+- Deferred the whole mount to the page `load` event.
+
+New files: `react/usePageReady.ts`, `react/useRouteChange.ts`.
 
 See `docs/DEVELOPMENT_LOG.md` for the detailed record.
 

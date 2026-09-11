@@ -115,6 +115,101 @@ Fixed along the way (pre-existing bugs, not part of the original scope):
 New file: `react/viewport.ts`. Default behavior is unchanged — every new capability is
 opt-in and ships disabled.
 
+## Stability Iteration — page tree crash, hydration and deferred mount
+
+Triggered by a production report: the storefront broke completely, while the VTEX dev
+workspace looked fine. Four distinct defects came out of it.
+
+### A. The crash: React and the YouTube API fighting over one DOM node
+
+`YT.Player#destroy()` removes its own node from the DOM. The `<iframe>` was rendered by
+React, so the next removal React performed on that node threw
+`NotFoundError: Failed to execute 'removeChild' on 'Node'` during commit, which takes
+down the whole page tree — not just the widget.
+
+- Reproduced by any teardown path: the `×` button, a `videoId` change, the `spaKey`
+  remount on SPA navigation, and plain unmount.
+- Fix: React owns a stable `<div>` host; `useYouTubePlayer` creates the `<iframe>`
+  imperatively inside it. `destroy()` now acts on a node outside the reconciler.
+- Teardown checks the real `parentNode` before removing anything, since the API may
+  have replaced the node underneath.
+- `embedUrl` joined the effect deps: the `src` used to be swapped while the player
+  object went stale.
+- Why dev hid it: the development build of React recovers from this class of
+  divergence by re-rendering and only warns in the console; the production build
+  propagates the error. The path that triggers it most is SPA navigation between
+  pages, which is exercised far less in a workspace than in a real store.
+
+### B. Hydration mismatch
+
+`narrowViewport` / `dockViewport` were initialized from `window`, so the SSR markup was
+always desktop and the client hydrated a divergent tree. Beyond the corrupted sibling
+nodes in production, this has a real CPU cost: React discards the subtree and
+re-renders it.
+
+- Fix: no `window` reads in initializers. The component renders `null` until mounted,
+  then measures the viewport in an effect.
+- `useLayoutEffect` calls became isomorphic, and `getViewportWidth()` is SSR-safe.
+
+### C. The `history` monkey patch
+
+The patch was installed and reverted per instance. With two instances, or any remount,
+the cleanup restored a stale `history.pushState` and storefront navigation broke
+permanently. It also called `setState` synchronously inside `pushState`, i.e. in the
+middle of the router's commit.
+
+- Fix: `react/useRouteChange.ts` installs once per page, never reverts, and notifies
+  subscribers in a microtask.
+- Route changes compare `pathname` only. The runtime rewrites its own query string and
+  hash, and treating that as navigation tore down the freshly created player.
+- Installation is gated behind page load, so the widget does not touch the
+  storefront's history while it is still loading.
+
+### D. Deferred mount (`react/usePageReady.ts`)
+
+The widget holds back until the `load` event plus one frame. Performance was the
+motivation, but it also keeps the player from being born during the runtime's boot.
+
+- Always `loading="eager"` on the iframe now. It is only created when it should already
+  play, and `lazy` on a `position: fixed` card that is sometimes hidden in the dock
+  risks stalling the fetch indefinitely.
+- `YT.Player` is only constructed after the iframe's `load` event. Attaching the API to
+  a still-loading frame loses the initial `postMessage` and the player never responds —
+  a black, frozen video. A timeout caps the wait so the custom controls cannot stay
+  disabled forever if `load` never fires.
+
+### E. Regression introduced and fixed within this iteration
+
+With `startOnLoad` enabled the video stayed black. Cause: the player effect listed the
+host **ref** in its dependency array. A ref's identity never changes, so when the host
+node finally entered the DOM nothing in the deps moved and the effect was never
+re-executed — it had already run once, while the component still rendered `null`, bailed
+out with no host, and that was it.
+
+- With `startOnLoad` disabled the click flipped `shouldMountIframe` from `false` to
+  `true`, so the dep changed and the effect re-ran correctly. That asymmetry was the
+  diagnostic clue.
+- Fix: the effect depends on an `isHostMounted` **value**. The host is rendered exactly
+  when the component leaves its initial `null`, and `shouldMountIframe` already implies
+  `videoId && !isClosed`, so the two flags cannot disagree.
+- Lesson for future work here: a ref is never a valid trigger for "the node now
+  exists". Use a value (or a callback ref backed by state).
+
+### Performance audit after the iteration
+
+- Before `load`: one `null` render and four listeners (`load`, `resize`, two
+  `fullscreenchange`). No network, no iframe, no `history` patch.
+- Steady state: nothing runs continuously. The only polling is the 250ms progress
+  interval, alive only while hovering a ready player. `requestAnimationFrame` runs
+  only during drag; edge-detection `getBoundingClientRect` only while the pointer is
+  over the card.
+- Net wins beyond the deferred load: the SSR payload no longer carries this block, the
+  hydration re-render is gone, the `history` patch is shared instead of per instance,
+  and the crash (a full-tree remount) is gone.
+- Accepted trade-off: playback starts after `load` instead of during it.
+- Pre-existing, unrelated, not addressed: the `resize` handler is not throttled, and
+  the inline `<style>` block is duplicated per widget instance.
+
 ## Roadmap / TODOs
 
 ### 1. Drag handle bar below the card — DONE
@@ -255,10 +350,16 @@ were split into separate props while `liveMode` stayed as a shortcut.
       on release still requires no movement and `TAP_MAX_DURATION_MS` (renamed from
       `LONG_PRESS_MS`, whose meaning changed).
 
-### 5. Evaluate `startOnLoad: false` on PDP — TODO (not scheduled)
+### 5. Evaluate `startOnLoad: false` on PDP — TODO (partially superseded)
 
 Performance idea raised while reviewing the impact of this iteration. Deferred for a
 future analysis, no work started.
+
+> Update: the deferred mount (section D above) already removes the iframe and the
+> `iframe_api` script from the initial page load, which was the whole rationale below.
+> What remains of this item is narrower: with `startOnLoad: false` the iframe is never
+> fetched at all unless the user asks for it, versus being fetched after `load`. The
+> lever is much smaller now, so measure before changing product behavior.
 
 - [ ] Assess shipping the PDP with `startOnLoad: false`.
       Rationale: the dominant cost of this app is the YouTube iframe plus the

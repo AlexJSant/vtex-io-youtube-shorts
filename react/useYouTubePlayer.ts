@@ -49,6 +49,34 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
 }
 
+/**
+ * Resolve quando o iframe termina de carregar.
+ *
+ * A IFrame API conversa com o player por `postMessage`. Instanciar `YT.Player`
+ * sobre um iframe que ainda está carregando faz a mensagem inicial se perder e
+ * o player nunca responder — na prática, um vídeo preto e travado.
+ *
+ * O timeout evita que os controles próprios fiquem desabilitados para sempre
+ * caso o `load` não aconteça (bloqueio de rede, extensão, etc.).
+ */
+function waitForIframeLoad(iframe: HTMLIFrameElement, timeoutMs: number) {
+  return new Promise<void>((resolve) => {
+    let settled = false
+
+    const finish = () => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      resolve()
+    }
+
+    const timer = window.setTimeout(finish, timeoutMs)
+    iframe.addEventListener('load', finish, { once: true })
+  })
+}
+
+const IFRAME_LOAD_TIMEOUT_MS = 6000
+
 function useYouTubePlayer(options: {
   shouldMountIframe: boolean
   /**
@@ -59,6 +87,14 @@ function useYouTubePlayer(options: {
    * de componentes da página inteira.
    */
   hostRef: React.RefObject<HTMLDivElement>
+  /**
+   * Sinaliza que o host já está no DOM.
+   *
+   * Precisa ser um valor, não o ref: a identidade de um ref nunca muda, então o
+   * efeito não teria como ser reexecutado no momento em que o nó aparece — ele
+   * rodaria uma única vez, ainda sem host, e o vídeo nunca seria criado.
+   */
+  isHostMounted: boolean
   embedUrl: string | null
   videoId: string | null
   spaKey: number
@@ -84,6 +120,7 @@ function useYouTubePlayer(options: {
   const {
     shouldMountIframe,
     hostRef,
+    isHostMounted,
     embedUrl,
     videoId,
     spaKey,
@@ -125,6 +162,7 @@ function useYouTubePlayer(options: {
   useEffect(() => {
     if (!shouldMountIframe) return
     if (!embedUrl) return
+    if (!isHostMounted) return
 
     const host = hostRef.current
     if (!host) return
@@ -137,7 +175,10 @@ function useYouTubePlayer(options: {
     iframe.src = embedUrl
     iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'
     iframe.setAttribute('allowfullscreen', 'true')
-    iframe.setAttribute('loading', startOnLoadRef.current ? 'eager' : 'lazy')
+    // Sempre `eager`: o iframe só é criado quando já deve tocar, e o card é
+    // `position: fixed` (às vezes oculto na doca), cenário em que o `lazy` pode
+    // postergar o carregamento indefinidamente.
+    iframe.setAttribute('loading', 'eager')
     iframe.setAttribute('frameborder', '0')
     iframe.referrerPolicy = 'strict-origin-when-cross-origin'
     iframe.style.position = 'absolute'
@@ -148,9 +189,12 @@ function useYouTubePlayer(options: {
     iframe.style.height = '100%'
     iframe.style.border = '0'
 
+    // O listener precisa existir antes do append, senão o `load` pode escapar.
+    const iframeLoaded = waitForIframeLoad(iframe, IFRAME_LOAD_TIMEOUT_MS)
+
     host.appendChild(iframe)
 
-    loadYouTubeIframeAPI().then(() => {
+    Promise.all([loadYouTubeIframeAPI(), iframeLoaded]).then(() => {
       if (cancelled) return
       if (!window.YT?.Player) return
       // O iframe pode ter sido descartado enquanto a API carregava.
@@ -234,7 +278,16 @@ function useYouTubePlayer(options: {
       }
     }
     // Dependências: recria quando o iframe é forçado por `spaKey`/troca de vídeo.
-  }, [shouldMountIframe, hostRef, embedUrl, videoId, spaKey, looping, initialVolume])
+  }, [
+    shouldMountIframe,
+    hostRef,
+    isHostMounted,
+    embedUrl,
+    videoId,
+    spaKey,
+    looping,
+    initialVolume,
+  ])
 
   // Atualiza progresso/volume enquanto o usuário está no hover.
   useEffect(() => {

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import useDock from './useDock'
 import useDragResize from './useDragResize'
+import usePageReady from './usePageReady'
 import useRouteChange from './useRouteChange'
 import useYouTubePlayer from './useYouTubePlayer'
 import { getViewportWidth } from './viewport'
@@ -326,15 +327,20 @@ const YoutubeShortsWidget: any = ({
   // sempre com o layout desktop e a hidratação no cliente encontraria uma árvore
   // diferente, corrompendo os nós vizinhos da página. A viewport só é medida
   // depois da montagem, e até lá o componente não renderiza nada.
+  //
+  // A montagem também espera o `load` da página: o widget é acessório e não deve
+  // competir com o conteúdo principal nem nascer durante o boot do runtime.
+  const isPageReady = usePageReady()
   const [isMounted, setIsMounted] = useState(false)
   const [narrowViewport, setNarrowViewport] = useState(false)
   const [dockViewport, setDockViewport] = useState(false)
 
   useEffect(() => {
+    if (!isPageReady) return
     setNarrowViewport(isNarrowViewport())
     setDockViewport(isDockModeViewport())
     setIsMounted(true)
-  }, [])
+  }, [isPageReady])
 
   /** Vídeo oculto atrás do botão lateral, controles nativos e fluxo de tela cheia. */
   const isCompact = forceCompactMode || narrowViewport
@@ -380,12 +386,14 @@ const YoutubeShortsWidget: any = ({
   }, [shortsUrl, startOnLoad])
 
   // Recarrega quando a página do SPA trocar (mesmo que `shortsUrl` não mude).
+  // Só passa a observar a rota depois do `load`, para não tocar no `history`
+  // enquanto a loja ainda está carregando.
   useRouteChange(() => {
     setSpaKey((k) => k + 1)
     setIsClosed(false)
     setIsPlaying(false)
     setIsFullscreenOpen(false)
-  })
+  }, isPageReady)
 
   const dockOffsetX = isCompact ? mobileOffsetX : desktopOffsetX
 
@@ -566,6 +574,9 @@ const YoutubeShortsWidget: any = ({
   } = useYouTubePlayer({
     shouldMountIframe,
     hostRef: playerHostRef as React.RefObject<HTMLDivElement>,
+    // O host só é renderizado quando o componente sai do `null` inicial, e a partir
+    // daí `shouldMountIframe` já garante `videoId` e `!isClosed`.
+    isHostMounted: isMounted,
     embedUrl,
     videoId,
     spaKey,
